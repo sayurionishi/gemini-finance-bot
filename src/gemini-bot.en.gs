@@ -31,10 +31,12 @@ function doPost(e) {
     const text = msg.text?.trim();
     if (!text) return HtmlService.createHtmlOutput("no text");
 
-    const command = text.split('@')[0].toLowerCase();
+    // Strip Telegram's @BotName suffix added in group chats (e.g. "/person@MyBot Sayuri")
+    const cleanText = text.replace(/^(\/\w+)@\w+/, '$1');
+    const command = cleanText.toLowerCase();
     const commandBase = command.split(' ')[0];
-    // Use original text (not lowercased) for args to preserve name casing
-    const args = text.trim().substring(commandBase.length).trim();
+    // Args keep original casing so names like "Sayuri" aren't flattened
+    const args = cleanText.substring(commandBase.length).trim();
 
     // =====================================================
     // BASIC COMMANDS
@@ -101,7 +103,8 @@ function doPost(e) {
     }
 
     if (commandBase === "/person") {
-      const name = args ? toTitleCase(args) : "";
+      // Only take the first token — "/person Sayuri loves coffee" → "Sayuri"
+      const name = args ? toTitleCase(args.split(/\s+/)[0]) : "";
       sendMessage(chatId, getPersonTransactions(name), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -140,6 +143,8 @@ function doPost(e) {
     // =====================================================
     const senderName = msg.from.first_name || "User";
     const parsed = parseAndReactWithGemini(text, senderName);
+    // Gemini sometimes returns amounts as strings — coerce so .toLocaleString() formats correctly
+    if (parsed?.amount != null) parsed.amount = Number(parsed.amount);
     if (!parsed?.amount || !parsed?.type) {
       sendMessage(chatId, "🤔 I couldn't quite understand that transaction. Could you rephrase?\n\nExample: <code>lunch 10k sayuri</code> or <code>taxi 8500 - chloe</code>", "HTML");
       return HtmlService.createHtmlOutput("unclear");
@@ -166,19 +171,25 @@ function doPost(e) {
 // =====================================================
 function parseAndReactWithGemini(text, userName) {
   try {
+    const memberList = TRIP_MEMBERS.join(", ");
     const prompt = `
 You are a friendly group trip expense assistant tracking costs in South Korea.
 Analyze the following message and extract the transaction details.
+
+Trip members (these are the only valid payer names): ${memberList}
 
 Amount rules:
 - "10k" means 10,000 won, "1.5k" means 1,500 won, "10m" means 10,000,000 won
 - Currency is Korean Won (KRW). Return the amount as a plain integer.
 
 PaidBy rules (find the person who actually paid):
+- ONLY pick a paidBy if the name matches one of the trip members above (case-insensitive)
 - Name at the end of the message: "lunch 10k sayuri" → paidBy = "Sayuri"
 - Name after a dash or hyphen: "coffee 5000 - chloe" → paidBy = "Chloe"
 - Name before "paid": "manam paid 1350 for dinner" → paidBy = "Manam"
-- If no name is found, use the sender's name: "${userName}"
+- Words that aren't trip-member names (places, foods, notes) are NOT payers
+  e.g. "lunch 10000 in cheonan" → no name detected → paidBy = sender
+- If no valid name is found, use the sender's name: "${userName}"
 - Always normalize paidBy to Title Case (e.g. "sayuri" → "Sayuri")
 
 Category options: Food, Transport, Accommodation, Activities, Shopping, Other
@@ -399,9 +410,10 @@ function getTripSummary() {
   let grandTotal = 0;
 
   data.forEach(row => {
-    const [, , type, amt, , , paidBy] = row;
+    const [, user, type, amt, , , paidBy] = row;
     if (type.toLowerCase() !== "expense") return;
-    const name = paidBy || "Unknown";
+    // Fall back to User (whoever logged it) for old rows that predate the PaidBy column
+    const name = paidBy || user || "Unknown";
     paid[name] = (paid[name] || 0) + Number(amt || 0);
     grandTotal += Number(amt || 0);
   });
@@ -444,11 +456,11 @@ function getTodayByPerson() {
   const byPerson = {};
 
   data.forEach(row => {
-    const [ts, , type, amt, note, , paidBy] = row;
+    const [ts, user, type, amt, note, , paidBy] = row;
     if (!ts || type.toLowerCase() !== "expense") return;
     const date = new Date(ts);
     if (date.getDate() !== d || date.getMonth() !== m || date.getFullYear() !== y) return;
-    const name = paidBy || "Unknown";
+    const name = paidBy || user || "Unknown";
     if (!byPerson[name]) byPerson[name] = [];
     byPerson[name].push({ note, amt: Number(amt || 0) });
   });
@@ -480,9 +492,11 @@ function getPersonTransactions(name) {
   let total = 0;
 
   data.forEach(row => {
-    const [ts, , type, amt, note, category, paidBy] = row;
+    const [ts, user, type, amt, note, category, paidBy] = row;
     if (!ts || type.toLowerCase() !== "expense") return;
-    if ((paidBy || "").toLowerCase() !== name.toLowerCase()) return;
+    // Fall back to User so old rows without PaidBy are still queryable
+    const effectivePayer = paidBy || user || "";
+    if (effectivePayer.toLowerCase() !== name.toLowerCase()) return;
     rows.push({ ts: new Date(ts), note, amt: Number(amt || 0), category });
     total += Number(amt || 0);
   });
@@ -513,9 +527,9 @@ function getSettlement() {
   let grandTotal = 0;
 
   data.forEach(row => {
-    const [, , type, amt, , , paidBy] = row;
+    const [, user, type, amt, , , paidBy] = row;
     if (type.toLowerCase() !== "expense") return;
-    const name = paidBy || "Unknown";
+    const name = paidBy || user || "Unknown";
     paid[name] = (paid[name] || 0) + Number(amt || 0);
     grandTotal += Number(amt || 0);
   });
