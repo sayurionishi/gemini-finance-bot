@@ -613,5 +613,5 @@ function dailyReportJob() {
 }
 
 function doGet() {
-  return HtmlService.createTextOutput("✅ Gemini Finance Bot v1 is running normally.");
+  return ContentService.createTextOutput("✅ Gemini Finance Bot v1 is running normally.");
 }
