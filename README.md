@@ -228,6 +228,113 @@ Nice budgeting today! 🎯
 
 ---
 
+## ✈️ Trip Mode (Korea Group Expense Tracker)
+
+This version of the bot is adapted for **group trip expense tracking** in Korean Won (₩).  
+Three friends sharing costs can log who paid for what, then settle up at the end of the day or trip.
+
+### Message Format
+
+The bot understands natural language. Just include the amount and optionally the payer’s name:
+
+| Message | What it records |
+|---------|----------------|
+| `lunch 10k sayuri` | ₩10,000 for lunch, paid by Sayuri |
+| `breakfast 19000 - chloe` | ₩19,000 for breakfast, paid by Chloe |
+| `manam paid 1350 for taxi` | ₩1,350 for taxi, paid by Manam |
+| `coffee 5500` | ₩5,500 for coffee, paid by the message sender |
+| `subway 1.5k` | ₩1,500 for subway (shorthand: `k` = ×1,000) |
+
+**Amount shorthands:** `10k` = ₩10,000 · `1.5k` = ₩1,500 · `10m` = ₩10,000,000
+
+If no name is detected, the **Telegram sender’s first name** is used as the payer.  
+Names are always normalized to Title Case.
+
+---
+
+### Trip Commands
+
+| Command | What it does |
+|---------|-------------|
+| `/trip` | Full trip summary: total spent, each person’s contribution vs. equal share |
+| `/today` | Today’s expenses itemized by person |
+| `/person <name>` | All expenses paid by one person across the whole trip |
+| `/settle` | Settlement: assuming equal split, who pays whom and exactly how much |
+
+---
+
+### Example: `/trip`
+
+```
+✈️ Full Trip Summary
+
+💰 Total Spent: ₩287,500
+➗ Equal Share: ₩95,833 per person
+
+Paid by each person:
+• Chloe: ₩120,000 (+₩24,167 over)
+• Manam: ₩97,500 (+₩1,667 over)
+• Sayuri: ₩70,000 (-₩25,833 under)
+
+Use /settle to see who pays whom.
+```
+
+### Example: `/settle`
+
+```
+💸 Trip Settlement
+
+💰 Total spent: ₩287,500
+➗ Equal share: ₩95,833 per person
+
+What each person paid:
+• Chloe: ₩120,000
+• Manam: ₩97,500
+• Sayuri: ₩70,000
+
+Transfers needed:
+• Sayuri → Chloe: ₩24,167
+• Sayuri → Manam: ₩1,666
+```
+
+### Example: `/today`
+
+```
+📅 Today’s Expenses by Person
+
+👤 Chloe — ₩38,000
+  • bibimbap lunch: ₩18,000
+  • convenience store: ₩20,000
+
+👤 Sayuri — ₩15,000
+  • subway: ₩3,500
+  • coffee: ₩11,500
+```
+
+### Example: `/person Chloe`
+
+```
+👤 Transactions by Chloe
+
+• [5/23] bibimbap lunch — ₩18,000 (Food)
+• [5/23] convenience store — ₩20,000 (Shopping)
+• [5/24] museum entry — ₩15,000 (Activities)
+
+💰 Total paid: ₩53,000
+```
+
+---
+
+### Configuration
+
+In `gemini-bot.en.gs`, set the trip members list so the settlement always divides correctly — even if someone hasn’t paid for anything yet:
+
+```js
+const TRIP_MEMBERS = [“Sayuri”, “Chloe”, “Manam”]; // ← customize with your group
+```
+
+---
+
 ## 🧰 Tech Stack
 
 | Tool | Purpose |
