@@ -16,7 +16,7 @@ const REPORT_HOUR   = 21;
 
 // Default member roster used when a chat hasn't set its own via /setmembers.
 // Per-chat rosters take precedence — see getMembers().
-const TRIP_MEMBERS = ["Sayuri", "Chloe", "Manam"];
+const TRIP_MEMBERS = ["Sayuri", "Chloe"];
 
 // Supported currencies — extend as needed.
 // shorthands: true enables "10k" = 10,000 / "1.5k" = 1,500 parsing in Gemini.
@@ -197,7 +197,7 @@ function doPost(e) {
       return HtmlService.createHtmlOutput("ok");
     }
 
-    // /setmembers Sayuri Chloe Manam  (or comma-separated)
+    // /setmembers Sayuri Chloe Alex  (or comma-separated)
     if (commandBase === "/setmembers") {
       if (!args) {
         const current = getMembers(chatId);
@@ -205,8 +205,8 @@ function doPost(e) {
         sendMessage(chatId,
           `👥 <b>Current members:</b> ${current.join(", ")}${label}\n\n` +
           `Set new list:\n` +
-          `<code>/setmembers Sayuri Chloe Manam</code>\n` +
-          `<code>/setmembers Sayuri, Chloe, Manam</code>`,
+          `<code>/setmembers Sayuri Chloe Alex</code>\n` +
+          `<code>/setmembers Sayuri, Chloe, Alex</code>`,
           "HTML");
         return HtmlService.createHtmlOutput("ok");
       }
@@ -220,7 +220,7 @@ function doPost(e) {
           `Existing data is untouched — old payers still appear in /settle.`,
           "HTML");
       } else {
-        sendMessage(chatId, `⚠️ Please provide at least one name.\nExample: <code>/setmembers Sayuri Chloe Manam</code>`, "HTML");
+        sendMessage(chatId, `⚠️ Please provide at least one name.\nExample: <code>/setmembers Sayuri Chloe Alex</code>`, "HTML");
       }
       return HtmlService.createHtmlOutput("ok");
     }
@@ -366,7 +366,7 @@ PaidBy rules (find the person who actually paid):
 - ONLY use a name from the trip members list above (case-insensitive match)
 - Name at the end of the message: "lunch 10k sayuri" → paidBy = "Sayuri"
 - Name after a dash or hyphen: "coffee 5000 - chloe" → paidBy = "Chloe"
-- Name before "paid": "manam paid 1350 for dinner" → paidBy = "Manam"
+- Name before "paid": "chloe paid 1350 for dinner" → paidBy = "Chloe"
 - Words that are NOT trip-member names (places, foods, notes) are never payers
   e.g. "lunch 10000 in cheonan" → no name found → paidBy = sender's name
 - If no valid name is found, use the sender's name: "${userName}"

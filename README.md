@@ -241,7 +241,7 @@ The bot understands natural language. Just include the amount and optionally the
 |---------|----------------|
 | `lunch 10k sayuri` | ₩10,000 for lunch, paid by Sayuri |
 | `breakfast 19000 - chloe` | ₩19,000 for breakfast, paid by Chloe |
-| `manam paid 1350 for taxi` | ₩1,350 for taxi, paid by Manam |
+| `alex paid 1350 for taxi` | ₩1,350 for taxi, paid by Alex |
 | `coffee 5500` | ₩5,500 for coffee, paid by the message sender |
 | `subway 1.5k` | ₩1,500 for subway (shorthand: `k` = ×1,000) |
 
@@ -273,7 +273,7 @@ Names are always normalized to Title Case.
 
 Paid by each person:
 • Chloe: ₩120,000 (+₩24,167 over)
-• Manam: ₩97,500 (+₩1,667 over)
+• Alex: ₩97,500 (+₩1,667 over)
 • Sayuri: ₩70,000 (-₩25,833 under)
 
 Use /settle to see who pays whom.
@@ -289,12 +289,12 @@ Use /settle to see who pays whom.
 
 What each person paid:
 • Chloe: ₩120,000
-• Manam: ₩97,500
+• Alex: ₩97,500
 • Sayuri: ₩70,000
 
 Transfers needed:
 • Sayuri → Chloe: ₩24,167
-• Sayuri → Manam: ₩1,666
+• Sayuri → Alex: ₩1,666
 ```
 
 ### Example: `/today`
@@ -327,10 +327,22 @@ Transfers needed:
 
 ### Configuration
 
-In `gemini-bot.en.gs`, set the trip members list so the settlement always divides correctly — even if someone hasn’t paid for anything yet:
+The bot supports **per-chat settings** so multiple groups (and a solo chat) can share one deployment:
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `/setmembers <names>` | Set the trip roster for this chat | `/setmembers Sayuri Chloe Alex` |
+| `/setcurrency <code>` | Set the currency for this chat | `/setcurrency KRW` |
+| `/whoami` | Show this chat's ID, currency, tab, and members | — |
+
+**Supported currencies:** `KRW` (₩) · `NZD` ($) · `USD` ($) · `AUD` ($) · `PHP` (₱) · `EUR` (€) · `GBP` (£) · `JPY` (¥)
+
+**Sheet tabs:** Each chat automatically gets its own tab in the Google Sheet — you only configure one `SHEET_ID`. The first chat to message after deploying claims the existing `Transactions` tab; subsequent new chats get a tab named after their chat ID.
+
+**Member fallback:** If a chat hasn't run `/setmembers`, the bot falls back to the global default at the top of `gemini-bot.en.gs`:
 
 ```js
-const TRIP_MEMBERS = [“Sayuri”, “Chloe”, “Manam”]; // ← customize with your group
+const TRIP_MEMBERS = ["Sayuri", "Chloe"]; // ← edit or override with /setmembers
 ```
 
 ---
