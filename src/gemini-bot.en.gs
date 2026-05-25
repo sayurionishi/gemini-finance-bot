@@ -14,8 +14,8 @@ const ADMIN_CHAT_ID = 'YOUR_CHAT_ID';
 const REMIND_HOUR   = 20;
 const REPORT_HOUR   = 21;
 
-// Names of all trip members — used for equal-split settlement.
-// Include everyone even if they haven't paid anything yet.
+// Default member roster used when a chat hasn't set its own via /setmembers.
+// Per-chat rosters take precedence — see getMembers().
 const TRIP_MEMBERS = ["Sayuri", "Chloe", "Manam"];
 
 // Supported currencies — extend as needed.
@@ -46,6 +46,35 @@ function setCurrency(chatId, code) {
   const upper = code.toUpperCase().trim();
   if (!CURRENCIES[upper]) return false;
   PropertiesService.getScriptProperties().setProperty(`CURRENCY_${chatId}`, upper);
+  return true;
+}
+
+// Returns the active member roster for a chat.
+// Per-chat roster if set, otherwise falls back to the global TRIP_MEMBERS.
+function getMembers(chatId) {
+  const raw = PropertiesService.getScriptProperties().getProperty(`MEMBERS_${chatId}`);
+  if (!raw) return TRIP_MEMBERS;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : TRIP_MEMBERS;
+  } catch (e) {
+    return TRIP_MEMBERS;
+  }
+}
+
+// True if a per-chat roster has been explicitly set.
+function hasCustomMembers(chatId) {
+  return PropertiesService.getScriptProperties().getProperty(`MEMBERS_${chatId}`) !== null;
+}
+
+// Stores the roster for a chat. Returns false if the list is empty after cleaning.
+function setMembers(chatId, names) {
+  const cleaned = [...new Set(names.map(n => n.trim()).filter(Boolean))];
+  if (cleaned.length === 0) return false;
+  PropertiesService.getScriptProperties().setProperty(
+    `MEMBERS_${chatId}`,
+    JSON.stringify(cleaned)
+  );
   return true;
 }
 
@@ -144,10 +173,11 @@ function doPost(e) {
         "• `/person <name>` – All transactions by a person\n" +
         "• `/settle` – Settlement: who pays whom\n\n" +
         "🛠️ Settings & other:\n" +
+        "• `/setmembers <names>` – Set trip members for this chat\n" +
         "• `/setcurrency <code>` – Set currency (" + supported + ")\n" +
         "• `/undo` – Undo last transaction\n" +
         "• `/confirm` – Confirm deletion\n" +
-        "• `/whoami` – Chat ID, currency & sheet tab\n\n" +
+        "• `/whoami` – Chat ID, currency, tab & members\n\n" +
         "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.\n\n" +
         "💱 Current currency: *" + currency.code + "* (" + currency.symbol + ")";
       sendMessage(chatId, helpText, "Markdown");
@@ -156,11 +186,42 @@ function doPost(e) {
 
     if (command === "/whoami") {
       const tabName = getSheetTabName(chatId);
+      const members = getMembers(chatId);
+      const memberLabel = hasCustomMembers(chatId) ? "" : " <i>(default)</i>";
       sendMessage(chatId,
         `🪪 <b>Chat ID:</b> <code>${chatId}</code>\n` +
         `💱 <b>Currency:</b> ${currency.code} (${currency.symbol})\n` +
-        `📋 <b>Sheet tab:</b> ${tabName}`,
+        `📋 <b>Sheet tab:</b> ${tabName}\n` +
+        `👥 <b>Members:</b> ${members.join(", ")}${memberLabel}`,
         "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /setmembers Sayuri Chloe Manam  (or comma-separated)
+    if (commandBase === "/setmembers") {
+      if (!args) {
+        const current = getMembers(chatId);
+        const label = hasCustomMembers(chatId) ? "" : " <i>(default)</i>";
+        sendMessage(chatId,
+          `👥 <b>Current members:</b> ${current.join(", ")}${label}\n\n` +
+          `Set new list:\n` +
+          `<code>/setmembers Sayuri Chloe Manam</code>\n` +
+          `<code>/setmembers Sayuri, Chloe, Manam</code>`,
+          "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      // Accept comma- or space-separated input; title-case each name
+      const rawNames = args.includes(',') ? args.split(',') : args.split(/\s+/);
+      const names = rawNames.map(s => toTitleCase(s.trim())).filter(Boolean);
+      if (setMembers(chatId, names)) {
+        sendMessage(chatId,
+          `✅ Members set to: <b>${names.join(", ")}</b>\n\n` +
+          `Future transactions will recognize these names. ` +
+          `Existing data is untouched — old payers still appear in /settle.`,
+          "HTML");
+      } else {
+        sendMessage(chatId, `⚠️ Please provide at least one name.\nExample: <code>/setmembers Sayuri Chloe Manam</code>`, "HTML");
+      }
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -254,7 +315,8 @@ function doPost(e) {
     // AI-BASED NATURAL TRANSACTION HANDLING
     // =====================================================
     const senderName = msg.from.first_name || "User";
-    const parsed = parseAndReactWithGemini(text, senderName, currency);
+    const members = getMembers(chatId);
+    const parsed = parseAndReactWithGemini(text, senderName, currency, members);
     // Gemini sometimes returns amounts as strings — coerce early so formatAmount works correctly
     if (parsed?.amount != null) parsed.amount = Number(parsed.amount);
     if (!parsed?.amount || !parsed?.type) {
@@ -284,9 +346,9 @@ function doPost(e) {
 // paidBy name, and a friendly reaction emoji string.
 // Amount rules adapt to the chat's configured currency.
 // =====================================================
-function parseAndReactWithGemini(text, userName, currency) {
+function parseAndReactWithGemini(text, userName, currency, members) {
   try {
-    const memberList = TRIP_MEMBERS.join(", ");
+    const memberList = members.join(", ");
     const amountRules = currency.shorthands
       ? `- "10k" means 10,000, "1.5k" means 1,500, "10m" means 10,000,000\n- Currency is ${currency.name} (${currency.code}). Return amount as a plain integer.`
       : `- Currency is ${currency.name} (${currency.code}). Return amount as a number with up to ${currency.decimals} decimal places (e.g. 5.50).`;
@@ -558,8 +620,9 @@ function getTripSummary(chatId) {
 
   if (grandTotal === 0) return "📭 No expenses recorded yet.";
 
-  // Include TRIP_MEMBERS even if they haven't paid anything yet
-  const allMembers = [...new Set([...TRIP_MEMBERS, ...Object.keys(paid)])];
+  // Include the chat's roster even if they haven't paid anything yet, but also
+  // include any existing payer in the sheet so removed members aren't dropped.
+  const allMembers = [...new Set([...getMembers(chatId), ...Object.keys(paid)])];
   const share = grandTotal / allMembers.length;
 
   let result = `✈️ <b>Full Trip Summary</b>\n\n`;
@@ -656,7 +719,7 @@ function getPersonTransactions(name, chatId) {
 }
 
 // =====================================================
-// SETTLEMENT — equal-split across TRIP_MEMBERS,
+// SETTLEMENT — equal-split across the chat's members,
 // greedy algorithm to minimise number of transfers
 // =====================================================
 function getSettlement(chatId) {
@@ -680,8 +743,9 @@ function getSettlement(chatId) {
 
   if (grandTotal === 0) return "📭 No expenses to settle.";
 
-  // Include all configured members even if they paid nothing
-  const allMembers = [...new Set([...TRIP_MEMBERS, ...Object.keys(paid)])];
+  // Include the chat's roster + anyone who has actually paid (so removed
+  // members with existing transactions still appear)
+  const allMembers = [...new Set([...getMembers(chatId), ...Object.keys(paid)])];
   const share = grandTotal / allMembers.length;
 
   // balance > 0 = owed money; balance < 0 = owes money
