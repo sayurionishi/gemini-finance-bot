@@ -250,6 +250,23 @@ The bot understands natural language. Just include the amount and optionally the
 If no name is detected, the **Telegram sender’s first name** is used as the payer.  
 Names are always normalized to Title Case.
 
+**Multi-line messages:** Send multiple transactions in one message by separating them with newlines:
+
+```
+coffee 10k sayuri
+bread 2k chloe
+subway 1.5k
+```
+
+The bot records each line as a separate transaction and replies with a combined summary:
+
+```
+✅ Recorded 3 transactions:
+• coffee ₩10,000 — Sayuri
+• bread ₩2,000 — Chloe
+• subway ₩1,500 — Sayuri
+```
+
 ---
 
 ### Trip Commands

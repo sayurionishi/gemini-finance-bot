@@ -313,9 +313,47 @@ function doPost(e) {
 
     // =====================================================
     // AI-BASED NATURAL TRANSACTION HANDLING
+    // Supports multi-line messages: each non-empty line is
+    // treated as a separate transaction and recorded
+    // independently. Single-line messages work as before.
     // =====================================================
     const senderName = msg.from.first_name || "User";
     const members = getMembers(chatId);
+
+    const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length > 1) {
+      // Multi-line: parse each line, collect successes and failures
+      const successes = [];
+      const failures = [];
+      for (const line of lines) {
+        const p = parseAndReactWithGemini(line, senderName, currency, members);
+        if (p?.amount != null) p.amount = Number(p.amount);
+        if (!p?.amount || !p?.type) {
+          failures.push(line);
+        } else {
+          appendToSheet(p, senderName, chatId);
+          successes.push(p);
+        }
+      }
+      if (successes.length === 0) {
+        sendMessage(chatId,
+          "🤔 I couldn't understand any of those lines. Could you rephrase?\n\n" +
+          "Example:\n<code>coffee 10k sayuri\nbread 2k chloe</code>", "HTML");
+        return HtmlService.createHtmlOutput("unclear");
+      }
+      const rows = successes.map(p => {
+        const paidByLabel = p.paidBy || senderName;
+        return `• <b>${p.note || p.type}</b> ${formatAmount(p.amount, currency)} — ${paidByLabel}`;
+      });
+      let reply = `✅ Recorded ${successes.length} transaction${successes.length > 1 ? "s" : ""}:\n` + rows.join("\n");
+      if (failures.length > 0) {
+        reply += `\n\n⚠️ Couldn't parse:\n` + failures.map(f => `• ${f}`).join("\n");
+      }
+      sendMessage(chatId, reply, "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // Single-line (original flow)
     const parsed = parseAndReactWithGemini(text, senderName, currency, members);
     // Gemini sometimes returns amounts as strings — coerce early so formatAmount works correctly
     if (parsed?.amount != null) parsed.amount = Number(parsed.amount);
