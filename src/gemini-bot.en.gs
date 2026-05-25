@@ -49,13 +49,16 @@ function setCurrency(chatId, code) {
   return true;
 }
 
-// Formats a number with the correct symbol and decimal places for the currency.
+// Formats a number with the correct symbol and decimal places.
+// Negative numbers are shown as "-₩50,000", not "₩-50,000".
 function formatAmount(amount, currency) {
   const num = Number(amount) || 0;
-  if (currency.decimals === 0) {
-    return currency.symbol + Math.round(num).toLocaleString();
-  }
-  return currency.symbol + num.toFixed(currency.decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const sign = num < 0 ? '-' : '';
+  const abs = Math.abs(num);
+  const body = currency.decimals === 0
+    ? Math.round(abs).toLocaleString()
+    : abs.toFixed(currency.decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return sign + currency.symbol + body;
 }
 
 // =====================================================
@@ -65,21 +68,33 @@ function formatAmount(amount, currency) {
 // Returns the sheet tab name for this chatId.
 // The first chatId to call this claims the legacy "Transactions" tab so existing
 // data isn't lost. Every new chatId after that gets its own tab named by chatId.
+// LockService prevents two concurrent webhooks from both claiming "Transactions".
 function getSheetTabName(chatId) {
   const props = PropertiesService.getScriptProperties();
   const key = `SHEET_TAB_${chatId}`;
-  let tabName = props.getProperty(key);
-  if (!tabName) {
+  const cached = props.getProperty(key);
+  if (cached) return cached;
+
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    // Re-check inside the lock — another invocation may have set it while we waited
+    const recheck = props.getProperty(key);
+    if (recheck) return recheck;
+
     const ss = SpreadsheetApp.openById(SHEET_ID);
     const transTab = ss.getSheetByName("Transactions");
-    // Check if any other chatId already claimed "Transactions"
-    const alreadyClaimed = props.getKeys().some(
-      k => k.startsWith("SHEET_TAB_") && props.getProperty(k) === "Transactions"
+    // One round-trip instead of N+1 per-key reads
+    const allProps = props.getProperties();
+    const alreadyClaimed = Object.entries(allProps).some(
+      ([k, v]) => k.startsWith("SHEET_TAB_") && v === "Transactions"
     );
-    tabName = (transTab && !alreadyClaimed) ? "Transactions" : String(chatId);
+    const tabName = (transTab && !alreadyClaimed) ? "Transactions" : String(chatId);
     props.setProperty(key, tabName);
+    return tabName;
+  } finally {
+    lock.releaseLock();
   }
-  return tabName;
 }
 
 // =====================================================
@@ -151,7 +166,8 @@ function doPost(e) {
 
     // /setcurrency NZD
     if (commandBase === "/setcurrency") {
-      const code = args.toUpperCase().trim();
+      // First token only — "/setcurrency NZD extra" → "NZD"
+      const code = (args.split(/\s+/)[0] || "").toUpperCase();
       const supported = Object.keys(CURRENCIES).join(", ");
       if (!code) {
         sendMessage(chatId, `💱 Supported currencies: <b>${supported}</b>\nExample: <code>/setcurrency NZD</code>`, "HTML");
@@ -342,7 +358,7 @@ function ensureSheet(chatId) {
   if (!sh) {
     sh = ss.insertSheet(tabName);
     sh.appendRow(["Timestamp", "User", "Type", "Amount", "Note", "Category", "PaidBy"]);
-    return;
+    return sh;
   }
 
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
@@ -361,12 +377,13 @@ function ensureSheet(chatId) {
   if (!headers.includes("PaidBy")) {
     sh.getRange(1, sh.getLastColumn() + 1).setValue("PaidBy");
   }
+  return sh;
 }
 
+// Always go through ensureSheet so a brand-new chat that skips /start
+// (e.g. fires /setcurrency then a transaction) still gets a header row.
 function appendToSheet(parsed, user, chatId) {
-  const tabName = getSheetTabName(chatId);
-  const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
+  const sh = ensureSheet(chatId);
   sh.appendRow([
     new Date(),
     user,
