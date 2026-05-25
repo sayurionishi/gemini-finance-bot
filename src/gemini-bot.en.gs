@@ -1,22 +1,86 @@
 // =====================================================
 // MIT License © 2025 Nghia Nguyen
-// Adapted for group trip expense tracking (Korea Trip)
+// Adapted for group trip expense tracking
 // =====================================================
 
 // =====================================================
 // CONFIGURATION
 // =====================================================
-const BOT_TOKEN  = 'YOUR_TELEGRAM_TOKEN';
-const GEMINI_KEY = 'YOUR_GEMINI_API_KEY';
-const SHEET_ID   = 'YOUR_SHEET_ID';
-const TG_API     = 'https://api.telegram.org/bot' + BOT_TOKEN;
+const BOT_TOKEN     = 'YOUR_TELEGRAM_TOKEN';
+const GEMINI_KEY    = 'YOUR_GEMINI_API_KEY';
+const SHEET_ID      = 'YOUR_SHEET_ID';
+const TG_API        = 'https://api.telegram.org/bot' + BOT_TOKEN;
 const ADMIN_CHAT_ID = 'YOUR_CHAT_ID';
-const REMIND_HOUR = 20;
-const REPORT_HOUR = 21;
+const REMIND_HOUR   = 20;
+const REPORT_HOUR   = 21;
 
 // Names of all trip members — used for equal-split settlement.
 // Include everyone even if they haven't paid anything yet.
 const TRIP_MEMBERS = ["Sayuri", "Chloe", "Manam"];
+
+// Supported currencies — extend as needed.
+// shorthands: true enables "10k" = 10,000 / "1.5k" = 1,500 parsing in Gemini.
+const CURRENCIES = {
+  KRW: { code: "KRW", symbol: "₩", decimals: 0, name: "Korean Won",       shorthands: true  },
+  NZD: { code: "NZD", symbol: "$", decimals: 2, name: "NZ Dollar",         shorthands: false },
+  USD: { code: "USD", symbol: "$", decimals: 2, name: "US Dollar",         shorthands: false },
+  AUD: { code: "AUD", symbol: "$", decimals: 2, name: "AU Dollar",         shorthands: false },
+  PHP: { code: "PHP", symbol: "₱", decimals: 2, name: "Philippine Peso",   shorthands: false },
+  EUR: { code: "EUR", symbol: "€", decimals: 2, name: "Euro",              shorthands: false },
+  GBP: { code: "GBP", symbol: "£", decimals: 2, name: "British Pound",     shorthands: false },
+  JPY: { code: "JPY", symbol: "¥", decimals: 0, name: "Japanese Yen",      shorthands: false },
+};
+
+// =====================================================
+// CURRENCY HELPERS
+// =====================================================
+
+// Returns the currency config for a chat. Defaults to KRW.
+function getCurrency(chatId) {
+  const code = PropertiesService.getScriptProperties().getProperty(`CURRENCY_${chatId}`) || "KRW";
+  return CURRENCIES[code] || CURRENCIES.KRW;
+}
+
+// Stores the currency choice for a chat. Returns false if code is unknown.
+function setCurrency(chatId, code) {
+  const upper = code.toUpperCase().trim();
+  if (!CURRENCIES[upper]) return false;
+  PropertiesService.getScriptProperties().setProperty(`CURRENCY_${chatId}`, upper);
+  return true;
+}
+
+// Formats a number with the correct symbol and decimal places for the currency.
+function formatAmount(amount, currency) {
+  const num = Number(amount) || 0;
+  if (currency.decimals === 0) {
+    return currency.symbol + Math.round(num).toLocaleString();
+  }
+  return currency.symbol + num.toFixed(currency.decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// =====================================================
+// SHEET TAB ROUTING — one tab per chat
+// =====================================================
+
+// Returns the sheet tab name for this chatId.
+// The first chatId to call this claims the legacy "Transactions" tab so existing
+// data isn't lost. Every new chatId after that gets its own tab named by chatId.
+function getSheetTabName(chatId) {
+  const props = PropertiesService.getScriptProperties();
+  const key = `SHEET_TAB_${chatId}`;
+  let tabName = props.getProperty(key);
+  if (!tabName) {
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const transTab = ss.getSheetByName("Transactions");
+    // Check if any other chatId already claimed "Transactions"
+    const alreadyClaimed = props.getKeys().some(
+      k => k.startsWith("SHEET_TAB_") && props.getProperty(k) === "Transactions"
+    );
+    tabName = (transTab && !alreadyClaimed) ? "Transactions" : String(chatId);
+    props.setProperty(key, tabName);
+  }
+  return tabName;
+}
 
 // =====================================================
 // WEBHOOK ENTRY POINT
@@ -35,19 +99,24 @@ function doPost(e) {
     const cleanText = text.replace(/^(\/\w+)@\w+/, '$1');
     const command = cleanText.toLowerCase();
     const commandBase = command.split(' ')[0];
-    // Args keep original casing so names like "Sayuri" aren't flattened
+    // Args keep original casing so names like "Sayuri" aren't lowercased
     const args = cleanText.substring(commandBase.length).trim();
+
+    const currency = getCurrency(chatId);
 
     // =====================================================
     // BASIC COMMANDS
     // =====================================================
     if (command === "/start" || command === "/help") {
-      ensureSheet();
+      ensureSheet(chatId);
+      const supported = Object.keys(CURRENCIES).join(", ");
       const helpText =
         "👋 Hello *" + (msg.from.first_name || "there") + "!*\n\n" +
-        "I'm *Gemini Finance Bot* 💰 – your Korea trip expense tracker.\n\n" +
+        "I'm *Gemini Finance Bot* 💰 – your expense tracker.\n\n" +
         "🧾 Log expenses naturally:\n" +
-        "• `lunch 10k sayuri`\n• `breakfast 19000 - chloe`\n• `taxi 8500`\n\n" +
+        "• `lunch 10k sayuri` (KRW shorthand)\n" +
+        "• `coffee 5.50 - chloe` (decimal currency)\n" +
+        "• `taxi 8500`\n\n" +
         "📊 Report commands:\n" +
         "• `/report` – Overall report\n" +
         "• `/reportday` – Today's report\n" +
@@ -59,33 +128,59 @@ function doPost(e) {
         "• `/today` – Today's expenses by person\n" +
         "• `/person <name>` – All transactions by a person\n" +
         "• `/settle` – Settlement: who pays whom\n\n" +
-        "🛠️ Other:\n" +
+        "🛠️ Settings & other:\n" +
+        "• `/setcurrency <code>` – Set currency (" + supported + ")\n" +
         "• `/undo` – Undo last transaction\n" +
         "• `/confirm` – Confirm deletion\n" +
-        "• `/whoami` – View Chat ID\n\n" +
-        "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.";
+        "• `/whoami` – Chat ID, currency & sheet tab\n\n" +
+        "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.\n\n" +
+        "💱 Current currency: *" + currency.code + "* (" + currency.symbol + ")";
       sendMessage(chatId, helpText, "Markdown");
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (command === "/whoami") {
-      sendMessage(chatId, `🪪 Your Chat ID: <code>${chatId}</code>`, "HTML");
+      const tabName = getSheetTabName(chatId);
+      sendMessage(chatId,
+        `🪪 <b>Chat ID:</b> <code>${chatId}</code>\n` +
+        `💱 <b>Currency:</b> ${currency.code} (${currency.symbol})\n` +
+        `📋 <b>Sheet tab:</b> ${tabName}`,
+        "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /setcurrency NZD
+    if (commandBase === "/setcurrency") {
+      const code = args.toUpperCase().trim();
+      const supported = Object.keys(CURRENCIES).join(", ");
+      if (!code) {
+        sendMessage(chatId, `💱 Supported currencies: <b>${supported}</b>\nExample: <code>/setcurrency NZD</code>`, "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      if (setCurrency(chatId, code)) {
+        const cur = getCurrency(chatId);
+        sendMessage(chatId,
+          `✅ Currency set to <b>${cur.code}</b> (${cur.symbol}) — ${cur.name}.\n` +
+          `All amounts in this chat will now use ${cur.symbol}`, "HTML");
+      } else {
+        sendMessage(chatId, `⚠️ Unknown currency code.\nSupported: <b>${supported}</b>`, "HTML");
+      }
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (["/report", "/reportday", "/reportmonth", "/reportcategory", "/topcategory"].includes(command)) {
       if (command === "/reportcategory") {
-        sendMessage(chatId, getCategoryReport(), "HTML");
+        sendMessage(chatId, getCategoryReport(chatId), "HTML");
         return HtmlService.createHtmlOutput("ok");
       }
       if (command === "/topcategory") {
-        sendMessage(chatId, getTopCategoryReport(), "HTML");
+        sendMessage(chatId, getTopCategoryReport(chatId), "HTML");
         return HtmlService.createHtmlOutput("ok");
       }
       let mode = "all";
       if (command === "/reportday") mode = "day";
       if (command === "/reportmonth") mode = "month";
-      sendMessage(chatId, getFinanceReport(mode), "HTML");
+      sendMessage(chatId, getFinanceReport(mode, chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -93,24 +188,24 @@ function doPost(e) {
     // TRIP COMMANDS
     // =====================================================
     if (command === "/trip") {
-      sendMessage(chatId, getTripSummary(), "HTML");
+      sendMessage(chatId, getTripSummary(chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (command === "/today") {
-      sendMessage(chatId, getTodayByPerson(), "HTML");
+      sendMessage(chatId, getTodayByPerson(chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (commandBase === "/person") {
       // Only take the first token — "/person Sayuri loves coffee" → "Sayuri"
       const name = args ? toTitleCase(args.split(/\s+/)[0]) : "";
-      sendMessage(chatId, getPersonTransactions(name), "HTML");
+      sendMessage(chatId, getPersonTransactions(name, chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (command === "/settle") {
-      sendMessage(chatId, getSettlement(), "HTML");
+      sendMessage(chatId, getSettlement(chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -118,14 +213,15 @@ function doPost(e) {
     // UNDO + CONFIRM HANDLING
     // =====================================================
     if (command === "/undo") {
-      const last = getLastTransaction();
+      const last = getLastTransaction(chatId);
       if (!last) {
         sendMessage(chatId, "⚠️ No recent transaction found to delete.");
         return HtmlService.createHtmlOutput("ok");
       }
       const confirmText =
         `❗ <b>Last transaction:</b>\n` +
-        `📅 ${last.date}\n💬 ${last.note}\n💸 ${last.type} ₩${last.amount.toLocaleString()} (${last.category || "Uncategorized"})\n` +
+        `📅 ${last.date}\n💬 ${last.note}\n` +
+        `💸 ${last.type} ${formatAmount(last.amount, currency)} (${last.category || "Uncategorized"})\n` +
         `👤 Paid by: ${last.paidBy || "Unknown"}\n\n` +
         `Reply with <b>/confirm</b> to delete this transaction.`;
       sendMessage(chatId, confirmText, "HTML");
@@ -133,7 +229,7 @@ function doPost(e) {
     }
 
     if (command === "/confirm") {
-      const deleted = deleteLastTransaction();
+      const deleted = deleteLastTransaction(chatId);
       sendMessage(chatId, deleted ? "✅ Last transaction deleted!" : "⚠️ Nothing to delete.");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -142,18 +238,20 @@ function doPost(e) {
     // AI-BASED NATURAL TRANSACTION HANDLING
     // =====================================================
     const senderName = msg.from.first_name || "User";
-    const parsed = parseAndReactWithGemini(text, senderName);
-    // Gemini sometimes returns amounts as strings — coerce so .toLocaleString() formats correctly
+    const parsed = parseAndReactWithGemini(text, senderName, currency);
+    // Gemini sometimes returns amounts as strings — coerce early so formatAmount works correctly
     if (parsed?.amount != null) parsed.amount = Number(parsed.amount);
     if (!parsed?.amount || !parsed?.type) {
-      sendMessage(chatId, "🤔 I couldn't quite understand that transaction. Could you rephrase?\n\nExample: <code>lunch 10k sayuri</code> or <code>taxi 8500 - chloe</code>", "HTML");
+      sendMessage(chatId,
+        "🤔 I couldn't quite understand that transaction. Could you rephrase?\n\n" +
+        "Example: <code>lunch 10k sayuri</code> or <code>coffee 5.50 - chloe</code>", "HTML");
       return HtmlService.createHtmlOutput("unclear");
     }
 
-    appendToSheet(parsed, senderName);
+    appendToSheet(parsed, senderName, chatId);
     const paidByLabel = parsed.paidBy || senderName;
     const reply =
-      `✅ Recorded: <b>${parsed.type}</b> ₩${parsed.amount.toLocaleString()} — ${parsed.note || ""}\n` +
+      `✅ Recorded: <b>${parsed.type}</b> ${formatAmount(parsed.amount, currency)} — ${parsed.note || ""}\n` +
       `🏷️ Category: <b>${parsed.category || "Other"}</b>\n` +
       `👤 Paid by: <b>${paidByLabel}</b>\n\n${parsed.reaction}`;
     sendMessage(chatId, reply, "HTML");
@@ -166,45 +264,49 @@ function doPost(e) {
 }
 
 // =====================================================
-// GEMINI PARSER — extracts amount (KRW), type, category,
-// paidBy name, and a friendly reaction emoji string
+// GEMINI PARSER — extracts amount, type, category,
+// paidBy name, and a friendly reaction emoji string.
+// Amount rules adapt to the chat's configured currency.
 // =====================================================
-function parseAndReactWithGemini(text, userName) {
+function parseAndReactWithGemini(text, userName, currency) {
   try {
     const memberList = TRIP_MEMBERS.join(", ");
+    const amountRules = currency.shorthands
+      ? `- "10k" means 10,000, "1.5k" means 1,500, "10m" means 10,000,000\n- Currency is ${currency.name} (${currency.code}). Return amount as a plain integer.`
+      : `- Currency is ${currency.name} (${currency.code}). Return amount as a number with up to ${currency.decimals} decimal places (e.g. 5.50).`;
+
     const prompt = `
-You are a friendly group trip expense assistant tracking costs in South Korea.
+You are a friendly group expense assistant.
 Analyze the following message and extract the transaction details.
 
 Trip members (these are the only valid payer names): ${memberList}
 
 Amount rules:
-- "10k" means 10,000 won, "1.5k" means 1,500 won, "10m" means 10,000,000 won
-- Currency is Korean Won (KRW). Return the amount as a plain integer.
+${amountRules}
 
 PaidBy rules (find the person who actually paid):
-- ONLY pick a paidBy if the name matches one of the trip members above (case-insensitive)
+- ONLY use a name from the trip members list above (case-insensitive match)
 - Name at the end of the message: "lunch 10k sayuri" → paidBy = "Sayuri"
 - Name after a dash or hyphen: "coffee 5000 - chloe" → paidBy = "Chloe"
 - Name before "paid": "manam paid 1350 for dinner" → paidBy = "Manam"
-- Words that aren't trip-member names (places, foods, notes) are NOT payers
-  e.g. "lunch 10000 in cheonan" → no name detected → paidBy = sender
+- Words that are NOT trip-member names (places, foods, notes) are never payers
+  e.g. "lunch 10000 in cheonan" → no name found → paidBy = sender's name
 - If no valid name is found, use the sender's name: "${userName}"
 - Always normalize paidBy to Title Case (e.g. "sayuri" → "Sayuri")
 
 Category options: Food, Transport, Accommodation, Activities, Shopping, Other
 
-For trip expense tracking, type is almost always "expense".
+For expense tracking, type is almost always "expense".
 Use "income" only if someone explicitly received money back or was reimbursed.
 
-Return ONLY a raw JSON object with no markdown fences, no explanation:
+Return ONLY a raw JSON object — no markdown fences, no explanation:
 {
   "type": "expense" or "income",
-  "amount": integer in KRW,
+  "amount": number,
   "note": "short description of what was purchased",
   "category": "Food | Transport | Accommodation | Activities | Shopping | Other",
   "paidBy": "Name in Title Case",
-  "reaction": "short friendly trip-themed reply with emojis (1-2 sentences)"
+  "reaction": "short friendly reply with emojis (1-2 sentences)"
 }
 
 User message: "${text}"
@@ -230,14 +332,16 @@ Sender name: "${userName}"
 
 // =====================================================
 // SHEET HANDLERS — 7 columns:
-// Timestamp | User | Type | Amount (KRW) | Note | Category | PaidBy
+// Timestamp | User | Type | Amount | Note | Category | PaidBy
+// Each chat gets its own tab via getSheetTabName().
 // =====================================================
-function ensureSheet() {
+function ensureSheet(chatId) {
+  const tabName = getSheetTabName(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  let sh = ss.getSheetByName("Transactions");
+  let sh = ss.getSheetByName(tabName);
   if (!sh) {
-    sh = ss.insertSheet("Transactions");
-    sh.appendRow(["Timestamp", "User", "Type", "Amount (KRW)", "Note", "Category", "PaidBy"]);
+    sh = ss.insertSheet(tabName);
+    sh.appendRow(["Timestamp", "User", "Type", "Amount", "Note", "Category", "PaidBy"]);
     return;
   }
 
@@ -247,21 +351,22 @@ function ensureSheet() {
     sh.getRange(1, 6).setValue("Category");
   }
 
-  // Rename USD column to KRW on existing sheets
-  const usdIdx = headers.indexOf("Amount (USD)");
-  if (usdIdx !== -1) {
-    sh.getRange(1, usdIdx + 1).setValue("Amount (KRW)");
-  }
+  // Normalize legacy column names from older deployments
+  ["Amount (USD)", "Amount (KRW)"].forEach(old => {
+    const idx = headers.indexOf(old);
+    if (idx !== -1) sh.getRange(1, idx + 1).setValue("Amount");
+  });
 
-  // Auto-add PaidBy column on first run against an existing sheet
+  // Auto-add PaidBy column if this sheet predates it
   if (!headers.includes("PaidBy")) {
     sh.getRange(1, sh.getLastColumn() + 1).setValue("PaidBy");
   }
 }
 
-function appendToSheet(parsed, user) {
+function appendToSheet(parsed, user, chatId) {
+  const tabName = getSheetTabName(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions") || ss.insertSheet("Transactions");
+  const sh = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
   sh.appendRow([
     new Date(),
     user,
@@ -274,18 +379,18 @@ function appendToSheet(parsed, user) {
 }
 
 // =====================================================
-// UNDO HANDLING
+// UNDO HANDLING — keyed per chatId so chats don't conflict
 // =====================================================
-function getLastTransaction() {
+function getLastTransaction(chatId) {
+  const tabName = getSheetTabName(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return null;
 
   const lastRow = sh.getLastRow();
-  // Read however many columns the sheet currently has
   const row = sh.getRange(lastRow, 1, 1, sh.getLastColumn()).getValues()[0];
 
-  PropertiesService.getScriptProperties().setProperty("LAST_UNDO_ROW", lastRow);
+  PropertiesService.getScriptProperties().setProperty(`LAST_UNDO_ROW_${chatId}`, lastRow);
 
   return {
     date: row[0],
@@ -298,16 +403,17 @@ function getLastTransaction() {
   };
 }
 
-function deleteLastTransaction() {
+function deleteLastTransaction(chatId) {
+  const tabName = getSheetTabName(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
 
-  const lastRow = Number(PropertiesService.getScriptProperties().getProperty("LAST_UNDO_ROW"));
+  const lastRow = Number(PropertiesService.getScriptProperties().getProperty(`LAST_UNDO_ROW_${chatId}`));
   if (!lastRow || lastRow <= 1 || !sh) return false;
 
   try {
     sh.deleteRow(lastRow);
-    PropertiesService.getScriptProperties().deleteProperty("LAST_UNDO_ROW");
+    PropertiesService.getScriptProperties().deleteProperty(`LAST_UNDO_ROW_${chatId}`);
     return true;
   } catch (err) {
     Logger.log("Undo deletion error: " + err);
@@ -318,9 +424,11 @@ function deleteLastTransaction() {
 // =====================================================
 // REPORTING FUNCTIONS
 // =====================================================
-function getFinanceReport(mode = "all") {
+function getFinanceReport(mode = "all", chatId) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh) return "⚠️ No data available.";
   const data = sh.getDataRange().getValues();
   if (data.length <= 1) return "📭 No transactions recorded yet.";
@@ -335,19 +443,27 @@ function getFinanceReport(mode = "all") {
     const date = new Date(ts);
     if (mode === "day" && (date.getDate() !== d || date.getMonth() !== m || date.getFullYear() !== y)) continue;
     if (mode === "month" && (date.getMonth() !== m || date.getFullYear() !== y)) continue;
-    if (type.toLowerCase() === "income") income += amt;
-    if (type.toLowerCase() === "expense") expense += amt;
+    if (type.toLowerCase() === "income")  income  += Number(amt);
+    if (type.toLowerCase() === "expense") expense += Number(amt);
   }
 
   const balance = income - expense;
   const emoji = balance >= 0 ? "🟢" : "🔴";
-  const title = mode === "day" ? "📅 <b>Today's Report</b>" : mode === "month" ? "🗓️ <b>This Month's Report</b>" : "📊 <b>Overall Report</b>";
-  return `${title}\n\n💰 <b>Total Income:</b> ₩${income.toLocaleString()}\n💸 <b>Total Expense:</b> ₩${expense.toLocaleString()}\n${emoji} <b>Balance:</b> ₩${balance.toLocaleString()}\n\n${balance >= 0 ? "Nice job managing your money 😎" : "Spending a bit high today 😅"}`;
+  const title = mode === "day"   ? "📅 <b>Today's Report</b>"
+              : mode === "month" ? "🗓️ <b>This Month's Report</b>"
+              :                    "📊 <b>Overall Report</b>";
+  return `${title}\n\n` +
+    `💰 <b>Total Income:</b> ${formatAmount(income, currency)}\n` +
+    `💸 <b>Total Expense:</b> ${formatAmount(expense, currency)}\n` +
+    `${emoji} <b>Balance:</b> ${formatAmount(balance, currency)}\n\n` +
+    `${balance >= 0 ? "Nice job managing your money 😎" : "Spending a bit high today 😅"}`;
 }
 
-function getCategoryReport() {
+function getCategoryReport(chatId) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No data found.";
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
   const totals = {};
@@ -363,13 +479,15 @@ function getCategoryReport() {
   entries.sort((a, b) => b[1] - a[1]);
 
   let result = "🏷️ <b>Expense by Category</b>\n\n";
-  entries.forEach(([cat, val]) => result += `• ${cat}: ₩${val.toLocaleString()}\n`);
+  entries.forEach(([cat, val]) => result += `• ${cat}: ${formatAmount(val, currency)}\n`);
   return result;
 }
 
-function getTopCategoryReport() {
+function getTopCategoryReport(chatId) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No expense data yet.";
 
   const today = new Date();
@@ -393,16 +511,20 @@ function getTopCategoryReport() {
   const [topCat, topVal] = entries[0];
   const percent = ((topVal / total) * 100).toFixed(1);
 
-  return `📈 <b>Top Spending Category This Month</b>\n\n🥇 <b>${topCat}</b>: ₩${topVal.toLocaleString()}\nAbout ${percent}% of total expenses.\n\nKeep up the good financial habits 💪`;
+  return `📈 <b>Top Spending Category This Month</b>\n\n` +
+    `🥇 <b>${topCat}</b>: ${formatAmount(topVal, currency)}\n` +
+    `About ${percent}% of total expenses.\n\nKeep up the good financial habits 💪`;
 }
 
 // =====================================================
 // TRIP SUMMARY — total trip spend, per-person breakdown,
 // and how each person stands vs. the equal share
 // =====================================================
-function getTripSummary() {
+function getTripSummary(chatId) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No trip expenses recorded yet.";
 
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
@@ -412,7 +534,6 @@ function getTripSummary() {
   data.forEach(row => {
     const [, user, type, amt, , , paidBy] = row;
     if (type.toLowerCase() !== "expense") return;
-    // Fall back to User (whoever logged it) for old rows that predate the PaidBy column
     const name = paidBy || user || "Unknown";
     paid[name] = (paid[name] || 0) + Number(amt || 0);
     grandTotal += Number(amt || 0);
@@ -420,22 +541,22 @@ function getTripSummary() {
 
   if (grandTotal === 0) return "📭 No expenses recorded yet.";
 
-  // Use TRIP_MEMBERS as the baseline so everyone is included even with ₩0 paid
+  // Include TRIP_MEMBERS even if they haven't paid anything yet
   const allMembers = [...new Set([...TRIP_MEMBERS, ...Object.keys(paid)])];
   const share = grandTotal / allMembers.length;
 
   let result = `✈️ <b>Full Trip Summary</b>\n\n`;
-  result += `💰 <b>Total Spent:</b> ₩${grandTotal.toLocaleString()}\n`;
-  result += `➗ <b>Equal Share:</b> ₩${Math.round(share).toLocaleString()} per person\n\n`;
+  result += `💰 <b>Total Spent:</b> ${formatAmount(grandTotal, currency)}\n`;
+  result += `➗ <b>Equal Share:</b> ${formatAmount(share, currency)} per person\n\n`;
   result += `<b>Paid by each person:</b>\n`;
 
   allMembers.sort().forEach(name => {
     const amt = paid[name] || 0;
     const diff = amt - share;
     const diffLabel = diff >= 0
-      ? `<i>(+₩${Math.round(diff).toLocaleString()} over)</i>`
-      : `<i>(-₩${Math.round(Math.abs(diff)).toLocaleString()} under)</i>`;
-    result += `• ${name}: ₩${amt.toLocaleString()} ${diffLabel}\n`;
+      ? `<i>(+${formatAmount(diff, currency)} over)</i>`
+      : `<i>(-${formatAmount(Math.abs(diff), currency)} under)</i>`;
+    result += `• ${name}: ${formatAmount(amt, currency)} ${diffLabel}\n`;
   });
 
   result += `\nUse /settle to see who pays whom.`;
@@ -445,9 +566,11 @@ function getTripSummary() {
 // =====================================================
 // TODAY BY PERSON — today's expenses itemized per payer
 // =====================================================
-function getTodayByPerson() {
+function getTodayByPerson(chatId) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No transactions yet.";
 
   const today = new Date();
@@ -470,8 +593,8 @@ function getTodayByPerson() {
   let result = `📅 <b>Today's Expenses by Person</b>\n\n`;
   Object.entries(byPerson).sort((a, b) => a[0].localeCompare(b[0])).forEach(([name, items]) => {
     const total = items.reduce((s, i) => s + i.amt, 0);
-    result += `👤 <b>${name}</b> — ₩${total.toLocaleString()}\n`;
-    items.forEach(i => result += `  • ${i.note}: ₩${i.amt.toLocaleString()}\n`);
+    result += `👤 <b>${name}</b> — ${formatAmount(total, currency)}\n`;
+    items.forEach(i => result += `  • ${i.note}: ${formatAmount(i.amt, currency)}\n`);
     result += `\n`;
   });
   return result;
@@ -480,11 +603,13 @@ function getTodayByPerson() {
 // =====================================================
 // PERSON TRANSACTIONS — all trip expenses for one person
 // =====================================================
-function getPersonTransactions(name) {
+function getPersonTransactions(name, chatId) {
   if (!name) return "⚠️ Please provide a name. Example: <code>/person Sayuri</code>";
 
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No transactions yet.";
 
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
@@ -507,19 +632,21 @@ function getPersonTransactions(name) {
   let result = `👤 <b>Transactions by ${name}</b>\n\n`;
   rows.forEach(r => {
     const dateStr = `${r.ts.getMonth() + 1}/${r.ts.getDate()}`;
-    result += `• [${dateStr}] ${r.note} — ₩${r.amt.toLocaleString()} (${r.category})\n`;
+    result += `• [${dateStr}] ${r.note} — ${formatAmount(r.amt, currency)} (${r.category})\n`;
   });
-  result += `\n💰 <b>Total paid:</b> ₩${total.toLocaleString()}`;
+  result += `\n💰 <b>Total paid:</b> ${formatAmount(total, currency)}`;
   return result;
 }
 
 // =====================================================
 // SETTLEMENT — equal-split across TRIP_MEMBERS,
-// greedy algorithm to minimize number of transfers
+// greedy algorithm to minimise number of transfers
 // =====================================================
-function getSettlement() {
+function getSettlement(chatId) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sh = ss.getSheetByName("Transactions");
+  const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No trip expenses recorded yet.";
 
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
@@ -536,34 +663,35 @@ function getSettlement() {
 
   if (grandTotal === 0) return "📭 No expenses to settle.";
 
-  // Include all configured members even if they paid ₩0
+  // Include all configured members even if they paid nothing
   const allMembers = [...new Set([...TRIP_MEMBERS, ...Object.keys(paid)])];
   const share = grandTotal / allMembers.length;
 
-  // balance > 0 means person is owed money; balance < 0 means person owes
+  // balance > 0 = owed money; balance < 0 = owes money
   const balance = {};
   allMembers.forEach(p => { balance[p] = (paid[p] || 0) - share; });
 
   // Greedy: repeatedly pair the biggest creditor with the biggest debtor
   const settlements = [];
   const bal = { ...balance };
+  const minAmount = currency.decimals === 0 ? 1 : 0.01;
   for (let iter = 0; iter < 100; iter++) {
-    const creditor = allMembers.reduce((best, p) => bal[p] > (bal[best] || 0) ? p : best, allMembers[0]);
-    const debtor   = allMembers.reduce((best, p) => bal[p] < (bal[best] || 0) ? p : best, allMembers[0]);
-    if (bal[creditor] < 1 || bal[debtor] > -1) break;
+    const creditor = allMembers.reduce((best, p) => bal[p] > bal[best] ? p : best, allMembers[0]);
+    const debtor   = allMembers.reduce((best, p) => bal[p] < bal[best] ? p : best, allMembers[0]);
+    if (bal[creditor] < minAmount || bal[debtor] > -minAmount) break;
     const amount = Math.min(bal[creditor], -bal[debtor]);
-    if (amount > 1) settlements.push({ from: debtor, to: creditor, amount: Math.round(amount) });
+    settlements.push({ from: debtor, to: creditor, amount });
     bal[creditor] -= amount;
     bal[debtor]   += amount;
   }
 
   let result = `💸 <b>Trip Settlement</b>\n\n`;
-  result += `💰 <b>Total spent:</b> ₩${grandTotal.toLocaleString()}\n`;
-  result += `➗ <b>Equal share:</b> ₩${Math.round(share).toLocaleString()} per person\n\n`;
+  result += `💰 <b>Total spent:</b> ${formatAmount(grandTotal, currency)}\n`;
+  result += `➗ <b>Equal share:</b> ${formatAmount(share, currency)} per person\n\n`;
 
   result += `<b>What each person paid:</b>\n`;
   allMembers.sort().forEach(p => {
-    result += `• ${p}: ₩${Math.round(paid[p] || 0).toLocaleString()}\n`;
+    result += `• ${p}: ${formatAmount(paid[p] || 0, currency)}\n`;
   });
 
   result += `\n<b>Transfers needed:</b>\n`;
@@ -571,7 +699,7 @@ function getSettlement() {
     result += `✅ Everyone's even — nothing to settle!`;
   } else {
     settlements.forEach(s => {
-      result += `• ${s.from} → ${s.to}: ₩${s.amount.toLocaleString()}\n`;
+      result += `• ${s.from} → ${s.to}: ${formatAmount(s.amount, currency)}\n`;
     });
   }
   return result;
@@ -602,14 +730,14 @@ function sendMessage(chatId, text, mode = "HTML", buttons = null) {
 // DAILY JOBS
 // =====================================================
 function dailyReminderJob() {
-  const message = "💡 Time to log your expenses!\nHave you added today's trip costs? 📝";
+  const message = "💡 Time to log your expenses!\nHave you added today's costs? 📝";
   const buttons = [[{ text: "📅 Today by Person", callback_data: "/today" }, { text: "✈️ Trip Summary", callback_data: "/trip" }]];
   sendMessage(ADMIN_CHAT_ID, message, "Markdown", buttons);
 }
 
 function dailyReportJob() {
-  const report = getTodayByPerson();
-  sendMessage(ADMIN_CHAT_ID, "⏰ 21:00 – Daily Trip Report:\n\n" + report, "HTML");
+  const report = getTodayByPerson(ADMIN_CHAT_ID);
+  sendMessage(ADMIN_CHAT_ID, "⏰ 21:00 – Daily Report:\n\n" + report, "HTML");
 }
 
 function doGet() {
