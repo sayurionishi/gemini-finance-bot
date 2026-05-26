@@ -202,16 +202,19 @@ function doPost(e) {
         "📋 History:\n" +
         "• `/list` – Last 10 transactions with IDs\n" +
         "• `/list 20` – Last 20 transactions\n" +
-        "• `/delete <id>` – Delete transaction by ID\n\n" +
+        "• `/delete <id>` – Delete transaction by ID\n" +
+        "• `/edit <id> <field> <value>` – Edit a transaction\n" +
+        "• `/search <keyword>` – Search transactions\n\n" +
         "🗂️ Trip lifecycle:\n" +
         "• `/newtrip [name]` – Archive current trip, start fresh\n\n" +
         "🛠️ Settings & other:\n" +
         "• `/setmembers <names>` – Set trip members for this chat\n" +
         "• `/setcurrency <code>` – Set currency (" + supported + ")\n" +
+        "• `/settimezone <tz>` – Set timezone (e.g. Asia/Seoul)\n" +
         "• `/reminders on/off` – Toggle daily reminders\n" +
         "• `/undo` – Undo last transaction\n" +
         "• `/confirm` – Confirm deletion\n" +
-        "• `/whoami` – Chat ID, currency, tab & members\n\n" +
+        "• `/whoami` – Chat ID, currency, tab, timezone & members\n\n" +
         "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.\n\n" +
         "💱 Current currency: *" + currency.code + "* (" + currency.symbol + ")";
       sendMessage(chatId, helpText, "Markdown");
@@ -222,11 +225,13 @@ function doPost(e) {
       const tabName = getSheetTabName(chatId);
       const members = getMembers(chatId);
       const memberLabel = hasCustomMembers(chatId) ? "" : " <i>(default)</i>";
+      const tz = getTimezone(chatId);
       sendMessage(chatId,
         `🪪 <b>Chat ID:</b> <code>${chatId}</code>\n` +
         `💱 <b>Currency:</b> ${currency.code} (${currency.symbol})\n` +
         `📋 <b>Sheet tab:</b> ${tabName}\n` +
-        `👥 <b>Members:</b> ${members.join(", ")}${memberLabel}`,
+        `👥 <b>Members:</b> ${members.join(", ")}${memberLabel}\n` +
+        `🕐 <b>Timezone:</b> ${tz}`,
         "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -275,6 +280,36 @@ function doPost(e) {
           `All amounts in this chat will now use ${cur.symbol}`, "HTML");
       } else {
         sendMessage(chatId, `⚠️ Unknown currency code.\nSupported: <b>${supported}</b>`, "HTML");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /settimezone Asia/Seoul
+    if (commandBase === "/settimezone") {
+      const tz = args.split(/\s+/)[0] || "";
+      if (!tz) {
+        const current = getTimezone(chatId);
+        sendMessage(chatId,
+          `🕐 <b>Current timezone:</b> <code>${current}</code>\n\n` +
+          `Set a new timezone:\n<code>/settimezone Asia/Seoul</code>\n` +
+          `<code>/settimezone Pacific/Auckland</code>\n\n` +
+          `Uses IANA timezone IDs (e.g. America/New_York, Europe/London).`,
+          "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      if (setTimezone(chatId, tz)) {
+        const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm");
+        sendMessage(chatId,
+          `✅ Timezone set to <b>${tz}</b>\n` +
+          `Current time there: <code>${nowStr}</code>\n\n` +
+          `/today and date-based reports now use this timezone.`,
+          "HTML");
+      } else {
+        sendMessage(chatId,
+          `⚠️ Unknown timezone: <code>${tz}</code>\n\n` +
+          `Use IANA timezone IDs. Examples:\n` +
+          `<code>Asia/Seoul</code> · <code>Pacific/Auckland</code> · <code>America/New_York</code>`,
+          "HTML");
       }
       return HtmlService.createHtmlOutput("ok");
     }
@@ -352,6 +387,49 @@ function doPost(e) {
           `• Paid by: ${paidBy || "?"}`,
           "HTML");
       }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /edit <id> <field> <value>
+    if (commandBase === "/edit") {
+      const parts = args.split(/\s+/);
+      const rowNum = parseInt(parts[0]);
+      const field = (parts[1] || "").toLowerCase();
+      const value = parts.slice(2).join(" ").trim();
+      if (!rowNum || !field || !value) {
+        sendMessage(chatId,
+          "⚠️ Usage: <code>/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;</code>\n\n" +
+          "Fields: <code>note</code>, <code>amount</code>, <code>payer</code>, <code>category</code>\n\n" +
+          "Examples:\n" +
+          "<code>/edit 15 amount 12000</code>\n" +
+          "<code>/edit 15 note taxi to airport</code>\n" +
+          "<code>/edit 15 payer Chloe</code>\n" +
+          "<code>/edit 15 category Transport</code>\n\n" +
+          "Use /list to find the transaction ID.", "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      const result = editTransaction(chatId, rowNum, field, value, currency);
+      if (result === "notfound") {
+        sendMessage(chatId, `⚠️ Transaction <code>#${rowNum}</code> not found. Use /list to see valid IDs.`, "HTML");
+      } else if (result === "badfield") {
+        sendMessage(chatId, `⚠️ Unknown field "<b>${field}</b>".\nValid: <code>note</code>, <code>amount</code>, <code>payer</code>, <code>category</code>`, "HTML");
+      } else if (result === "badamount") {
+        sendMessage(chatId, "⚠️ Invalid amount — please provide a number.", "HTML");
+      } else if (result === "badcategory") {
+        sendMessage(chatId, "⚠️ Invalid category.\nOptions: Food, Transport, Accommodation, Activities, Shopping, Other", "HTML");
+      } else {
+        sendMessage(chatId, `✅ Transaction <code>#${rowNum}</code> updated: <b>${field}</b> → ${result}`, "HTML");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /search <keyword>
+    if (commandBase === "/search") {
+      if (!args) {
+        sendMessage(chatId, "⚠️ Please provide a keyword.\nExample: <code>/search coffee</code>", "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      sendChunked(chatId, searchTransactions(chatId, args), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -655,16 +733,17 @@ function getFinanceReport(mode = "all", chatId) {
   const data = sh.getDataRange().getValues();
   if (data.length <= 1) return "📭 No transactions recorded yet.";
 
-  const today = new Date();
-  const d = today.getDate(), m = today.getMonth(), y = today.getFullYear();
+  const tz = getTimezone(chatId);
+  const todayDate = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+  const thisMonth = todayDate.substring(0, 7);
   let income = 0, expense = 0;
 
   for (let i = 1; i < data.length; i++) {
     const [ts, , type, amt] = data[i];
     if (!ts || !type || !amt) continue;
-    const date = new Date(ts);
-    if (mode === "day" && (date.getDate() !== d || date.getMonth() !== m || date.getFullYear() !== y)) continue;
-    if (mode === "month" && (date.getMonth() !== m || date.getFullYear() !== y)) continue;
+    const rowDate = Utilities.formatDate(new Date(ts), tz, "yyyy-MM-dd");
+    if (mode === "day"   && rowDate !== todayDate) continue;
+    if (mode === "month" && rowDate.substring(0, 7) !== thisMonth) continue;
     if (type.toLowerCase() === "income")  income  += Number(amt);
     if (type.toLowerCase() === "expense") expense += Number(amt);
   }
@@ -712,15 +791,16 @@ function getTopCategoryReport(chatId) {
   const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No expense data yet.";
 
-  const today = new Date();
-  const m = today.getMonth(), y = today.getFullYear();
+  const tz = getTimezone(chatId);
+  const thisMonth = Utilities.formatDate(new Date(), tz, "yyyy-MM");
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
   const totals = {};
 
   data.forEach(row => {
     const [ts, , type, amt, , category] = row;
-    const date = new Date(ts);
-    if (type.toLowerCase() === "expense" && date.getMonth() === m && date.getFullYear() === y) {
+    if (!ts) return;
+    const rowMonth = Utilities.formatDate(new Date(ts), tz, "yyyy-MM");
+    if (type.toLowerCase() === "expense" && rowMonth === thisMonth) {
       totals[category] = (totals[category] || 0) + Number(amt || 0);
     }
   });
@@ -796,16 +876,15 @@ function getTodayByPerson(chatId) {
   const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No transactions yet.";
 
-  const today = new Date();
-  const d = today.getDate(), m = today.getMonth(), y = today.getFullYear();
+  const tz = getTimezone(chatId);
+  const todayDate = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
   const byPerson = {};
 
   data.forEach(row => {
     const [ts, user, type, amt, note, , paidBy] = row;
     if (!ts || type.toLowerCase() !== "expense") return;
-    const date = new Date(ts);
-    if (date.getDate() !== d || date.getMonth() !== m || date.getFullYear() !== y) return;
+    if (Utilities.formatDate(new Date(ts), tz, "yyyy-MM-dd") !== todayDate) return;
     const name = paidBy || user || "Unknown";
     if (!byPerson[name]) byPerson[name] = [];
     byPerson[name].push({ note, amt: Number(amt || 0) });
@@ -851,11 +930,12 @@ function getPersonTransactions(name, chatId) {
 
   if (rows.length === 0) return `📭 No expenses found for <b>${name}</b>.`;
 
+  const tz = getTimezone(chatId);
   rows.sort((a, b) => a.ts - b.ts);
   let result = `👤 <b>Transactions by ${name}</b>\n\n`;
   rows.forEach(r => {
-    const dateStr = `${r.ts.getMonth() + 1}/${r.ts.getDate()}`;
-    result += `• [${dateStr}] ${r.note} — ${formatAmount(r.amt, currency)} (${r.category})\n`;
+    const d = Utilities.formatDate(r.ts, tz, "M/d");
+    result += `• [${d}] ${r.note} — ${formatAmount(r.amt, currency)} (${r.category})\n`;
   });
   result += `\n💰 <b>Total paid:</b> ${formatAmount(total, currency)}`;
   return result;
@@ -1040,14 +1120,15 @@ function listTransactions(chatId, n) {
   const numRows = lastRow - startRow + 1;
   const data = sh.getRange(startRow, 1, numRows, sh.getLastColumn()).getValues();
 
+  const tz = getTimezone(chatId);
   let result = `📋 <b>Last ${numRows} transaction${numRows !== 1 ? "s" : ""}</b>\n`;
-  result += `<i>Use /delete &lt;id&gt; to remove one.</i>\n\n`;
+  result += `<i>Use /delete &lt;id&gt; or /edit &lt;id&gt; &lt;field&gt; &lt;value&gt; to modify.</i>\n\n`;
 
   // Show most-recent first
   for (let i = data.length - 1; i >= 0; i--) {
     const rowNum = startRow + i;
     const [ts, , type, amt, note, , paidBy] = data[i];
-    const date = ts ? `${new Date(ts).getMonth() + 1}/${new Date(ts).getDate()}` : "?";
+    const date = ts ? Utilities.formatDate(new Date(ts), tz, "M/d") : "?";
     const emoji = type?.toLowerCase() === "income" ? "💰" : "💸";
     result += `<code>#${rowNum}</code> ${emoji} [${date}] <b>${note || "?"}</b> ${formatAmount(Number(amt || 0), currency)} — ${paidBy || "?"}\n`;
   }
@@ -1119,6 +1200,112 @@ function setRemindersEnabled(chatId, enabled) {
   } else {
     props.setProperty(`REMINDERS_OFF_${chatId}`, "true");
   }
+}
+
+// =====================================================
+// TIMEZONE HELPERS — per-chat IANA timezone
+// =====================================================
+
+// Returns the chat's configured timezone, or the Apps Script project default.
+function getTimezone(chatId) {
+  return PropertiesService.getScriptProperties().getProperty(`TIMEZONE_${chatId}`)
+    || Session.getScriptTimeZone();
+}
+
+// Stores a timezone after validating it via Utilities.formatDate. Returns false for unknown IDs.
+function setTimezone(chatId, tz) {
+  try {
+    Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+    PropertiesService.getScriptProperties().setProperty(`TIMEZONE_${chatId}`, tz);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// =====================================================
+// EDIT TRANSACTION — update one field of an existing row
+// Columns: 1=Timestamp 2=User 3=Type 4=Amount 5=Note 6=Category 7=PaidBy
+// =====================================================
+function editTransaction(chatId, rowNum, field, value, currency) {
+  const tabName = getSheetTabName(chatId);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(tabName);
+  if (!sh || rowNum <= 1 || rowNum > sh.getLastRow()) return "notfound";
+
+  const VALID_CATEGORIES = ["Food", "Transport", "Accommodation", "Activities", "Shopping", "Other"];
+  let col, newValue, display;
+
+  switch (field) {
+    case "note":
+    case "description":
+      col = 5; newValue = value; display = value; break;
+    case "amount": {
+      const num = Number(value.replace(/[^0-9.]/g, ""));
+      if (!num || isNaN(num)) return "badamount";
+      col = 4; newValue = num; display = formatAmount(num, currency); break;
+    }
+    case "payer":
+    case "paidby":
+      col = 7; newValue = toTitleCase(value); display = newValue; break;
+    case "category": {
+      const cat = toTitleCase(value.split(/\s+/)[0]);
+      if (!VALID_CATEGORIES.includes(cat)) return "badcategory";
+      col = 6; newValue = cat; display = cat; break;
+    }
+    default:
+      return "badfield";
+  }
+
+  try {
+    sh.getRange(rowNum, col).setValue(newValue);
+    return display;
+  } catch (err) {
+    Logger.log("editTransaction error: " + err);
+    return "notfound";
+  }
+}
+
+// =====================================================
+// SEARCH — find transactions by keyword across note/category/payer
+// =====================================================
+function searchTransactions(chatId, keyword) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
+  const tz = getTimezone(chatId);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(tabName);
+  if (!sh || sh.getLastRow() <= 1) return "📭 No transactions recorded yet.";
+
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  const q = keyword.toLowerCase();
+  const matches = [];
+
+  data.forEach((row, idx) => {
+    const [ts, , type, amt, note, category, paidBy] = row;
+    if (!ts) return;
+    if ([note, category, paidBy].join(" ").toLowerCase().includes(q)) {
+      matches.push({ rowNum: idx + 2, ts: new Date(ts), type, amt: Number(amt || 0), note, category, paidBy });
+    }
+  });
+
+  if (matches.length === 0) return `📭 No transactions found for "<b>${keyword}</b>".`;
+
+  const expenseTotal = matches
+    .filter(m => m.type?.toLowerCase() === "expense")
+    .reduce((s, m) => s + m.amt, 0);
+
+  // Show most recent 20
+  const shown = matches.slice(-20).reverse();
+  let result = `🔍 <b>Results for "${keyword}"</b> (${matches.length} found)\n\n`;
+  shown.forEach(m => {
+    const d = Utilities.formatDate(m.ts, tz, "M/d");
+    const emoji = m.type?.toLowerCase() === "income" ? "💰" : "💸";
+    result += `<code>#${m.rowNum}</code> ${emoji} [${d}] <b>${m.note || "?"}</b> ${formatAmount(m.amt, currency)} — ${m.paidBy || "?"}\n`;
+  });
+  if (matches.length > 20) result += `<i>…and ${matches.length - 20} earlier result${matches.length - 20 > 1 ? "s" : ""}</i>\n`;
+  result += `\n💰 <b>Total expenses:</b> ${formatAmount(expenseTotal, currency)}`;
+  return result;
 }
 
 // =====================================================
