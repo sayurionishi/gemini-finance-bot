@@ -90,6 +90,25 @@ function formatAmount(amount, currency) {
   return sign + currency.symbol + body;
 }
 
+// Sends a message, splitting it into ≤4000-char chunks on line boundaries so
+// Telegram's 4096-char limit is never exceeded by long reports.
+function sendChunked(chatId, text, mode = "HTML") {
+  const MAX = 4000;
+  if (text.length <= MAX) { sendMessage(chatId, text, mode); return; }
+  const lines = text.split("\n");
+  let chunk = "";
+  for (const line of lines) {
+    const next = chunk ? chunk + "\n" + line : line;
+    if (next.length > MAX) {
+      if (chunk) sendMessage(chatId, chunk, mode);
+      chunk = line;
+    } else {
+      chunk = next;
+    }
+  }
+  if (chunk) sendMessage(chatId, chunk, mode);
+}
+
 // =====================================================
 // SHEET TAB ROUTING — one tab per chat
 // =====================================================
@@ -136,7 +155,14 @@ function doPost(e) {
     if (!msg || msg.from?.is_bot) return HtmlService.createHtmlOutput("ignored");
 
     const chatId = msg.chat.id;
-    const text = msg.text?.trim();
+    const text = msg.text?.trim() || "";
+
+    // Receipt OCR: handle photo messages before the text guard
+    if (msg.photo) {
+      handleReceiptPhoto(msg, chatId);
+      return HtmlService.createHtmlOutput("ok");
+    }
+
     if (!text) return HtmlService.createHtmlOutput("no text");
 
     // Strip Telegram's @BotName suffix added in group chats (e.g. "/person@MyBot Sayuri")
@@ -160,7 +186,8 @@ function doPost(e) {
         "🧾 Log expenses naturally:\n" +
         "• `lunch 10k sayuri` (KRW shorthand)\n" +
         "• `coffee 5.50 - chloe` (decimal currency)\n" +
-        "• `taxi 8500`\n\n" +
+        "• Multi-line: send several transactions at once\n" +
+        "• 📷 Send a receipt photo to scan it automatically!\n\n" +
         "📊 Report commands:\n" +
         "• `/report` – Overall report\n" +
         "• `/reportday` – Today's report\n" +
@@ -172,9 +199,16 @@ function doPost(e) {
         "• `/today` – Today's expenses by person\n" +
         "• `/person <name>` – All transactions by a person\n" +
         "• `/settle` – Settlement: who pays whom\n\n" +
+        "📋 History:\n" +
+        "• `/list` – Last 10 transactions with IDs\n" +
+        "• `/list 20` – Last 20 transactions\n" +
+        "• `/delete <id>` – Delete transaction by ID\n\n" +
+        "🗂️ Trip lifecycle:\n" +
+        "• `/newtrip [name]` – Archive current trip, start fresh\n\n" +
         "🛠️ Settings & other:\n" +
         "• `/setmembers <names>` – Set trip members for this chat\n" +
         "• `/setcurrency <code>` – Set currency (" + supported + ")\n" +
+        "• `/reminders on/off` – Toggle daily reminders\n" +
         "• `/undo` – Undo last transaction\n" +
         "• `/confirm` – Confirm deletion\n" +
         "• `/whoami` – Chat ID, currency, tab & members\n\n" +
@@ -247,17 +281,17 @@ function doPost(e) {
 
     if (["/report", "/reportday", "/reportmonth", "/reportcategory", "/topcategory"].includes(command)) {
       if (command === "/reportcategory") {
-        sendMessage(chatId, getCategoryReport(chatId), "HTML");
+        sendChunked(chatId, getCategoryReport(chatId), "HTML");
         return HtmlService.createHtmlOutput("ok");
       }
       if (command === "/topcategory") {
-        sendMessage(chatId, getTopCategoryReport(chatId), "HTML");
+        sendChunked(chatId, getTopCategoryReport(chatId), "HTML");
         return HtmlService.createHtmlOutput("ok");
       }
       let mode = "all";
       if (command === "/reportday") mode = "day";
       if (command === "/reportmonth") mode = "month";
-      sendMessage(chatId, getFinanceReport(mode, chatId), "HTML");
+      sendChunked(chatId, getFinanceReport(mode, chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -265,24 +299,95 @@ function doPost(e) {
     // TRIP COMMANDS
     // =====================================================
     if (command === "/trip") {
-      sendMessage(chatId, getTripSummary(chatId), "HTML");
+      sendChunked(chatId, getTripSummary(chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (command === "/today") {
-      sendMessage(chatId, getTodayByPerson(chatId), "HTML");
+      sendChunked(chatId, getTodayByPerson(chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (commandBase === "/person") {
       // Only take the first token — "/person Sayuri loves coffee" → "Sayuri"
       const name = args ? toTitleCase(args.split(/\s+/)[0]) : "";
-      sendMessage(chatId, getPersonTransactions(name, chatId), "HTML");
+      sendChunked(chatId, getPersonTransactions(name, chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
     if (command === "/settle") {
-      sendMessage(chatId, getSettlement(chatId), "HTML");
+      sendChunked(chatId, getSettlement(chatId), "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // =====================================================
+    // HISTORY COMMANDS
+    // =====================================================
+
+    // /list [n] — show last N transactions with row IDs
+    if (commandBase === "/list") {
+      const n = parseInt(args) || 10;
+      sendChunked(chatId, listTransactions(chatId, n), "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /delete <id> — delete transaction by row ID from /list
+    if (commandBase === "/delete") {
+      const rowNum = parseInt(args);
+      if (!rowNum || rowNum <= 1) {
+        sendMessage(chatId,
+          "⚠️ Please provide a valid transaction ID.\n" +
+          "Example: <code>/delete 12</code>\n\nUse /list to see IDs.", "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      const deleted = deleteTransactionById(chatId, rowNum);
+      if (!deleted) {
+        sendMessage(chatId,
+          `⚠️ Transaction <code>#${rowNum}</code> not found.\nUse /list to see valid IDs.`, "HTML");
+      } else {
+        const [, , type, amt, note, , paidBy] = deleted;
+        sendMessage(chatId,
+          `🗑️ Deleted <code>#${rowNum}</code>:\n` +
+          `• <b>${note || "?"}</b> ${formatAmount(Number(amt || 0), currency)}\n` +
+          `• Paid by: ${paidBy || "?"}`,
+          "HTML");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // =====================================================
+    // TRIP LIFECYCLE
+    // =====================================================
+
+    // /newtrip [name] — archive current tab, start fresh
+    if (commandBase === "/newtrip") {
+      const tripName = args ? args.substring(0, 30) : "";
+      const result = startNewTrip(chatId, tripName);
+      sendMessage(chatId,
+        `🗂️ <b>New trip started!</b>\n\n` +
+        `📦 Old data archived: <code>${result.archivedTab}</code>\n` +
+        `✨ New tab: <code>${result.newTab}</code>\n\n` +
+        `All commands now record to the new tab. Old data is preserved.`,
+        "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // =====================================================
+    // REMINDER TOGGLE
+    // =====================================================
+    if (commandBase === "/reminders") {
+      const sub = args.toLowerCase();
+      if (sub === "off") {
+        setRemindersEnabled(chatId, false);
+        sendMessage(chatId, "🔕 Daily reminders disabled.\nUse /reminders on to re-enable.");
+      } else if (sub === "on") {
+        setRemindersEnabled(chatId, true);
+        sendMessage(chatId, "🔔 Daily reminders enabled.");
+      } else {
+        const status = isRemindersEnabled(chatId) ? "🔔 <b>ON</b>" : "🔕 <b>OFF</b>";
+        sendMessage(chatId,
+          `Daily reminders: ${status}\n\nUse /reminders on or /reminders off.`, "HTML");
+      }
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -313,9 +418,47 @@ function doPost(e) {
 
     // =====================================================
     // AI-BASED NATURAL TRANSACTION HANDLING
+    // Supports multi-line messages: each non-empty line is
+    // treated as a separate transaction and recorded
+    // independently. Single-line messages work as before.
     // =====================================================
     const senderName = msg.from.first_name || "User";
     const members = getMembers(chatId);
+
+    const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length > 1) {
+      // Multi-line: parse each line, collect successes and failures
+      const successes = [];
+      const failures = [];
+      for (const line of lines) {
+        const p = parseAndReactWithGemini(line, senderName, currency, members);
+        if (p?.amount != null) p.amount = Number(p.amount);
+        if (!p?.amount || !p?.type) {
+          failures.push(line);
+        } else {
+          appendToSheet(p, senderName, chatId);
+          successes.push(p);
+        }
+      }
+      if (successes.length === 0) {
+        sendMessage(chatId,
+          "🤔 I couldn't understand any of those lines. Could you rephrase?\n\n" +
+          "Example:\n<code>coffee 10k sayuri\nbread 2k chloe</code>", "HTML");
+        return HtmlService.createHtmlOutput("unclear");
+      }
+      const rows = successes.map(p => {
+        const paidByLabel = p.paidBy || senderName;
+        return `• <b>${p.note || p.type}</b> ${formatAmount(p.amount, currency)} — ${paidByLabel}`;
+      });
+      let reply = `✅ Recorded ${successes.length} transaction${successes.length > 1 ? "s" : ""}:\n` + rows.join("\n");
+      if (failures.length > 0) {
+        reply += `\n\n⚠️ Couldn't parse:\n` + failures.map(f => `• ${f}`).join("\n");
+      }
+      sendChunked(chatId, reply, "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // Single-line (original flow)
     const parsed = parseAndReactWithGemini(text, senderName, currency, members);
     // Gemini sometimes returns amounts as strings — coerce early so formatAmount works correctly
     if (parsed?.amount != null) parsed.amount = Number(parsed.amount);
@@ -787,6 +930,198 @@ function getSettlement(chatId) {
 }
 
 // =====================================================
+// RECEIPT OCR — Gemini Vision extracts expense from a photo
+// =====================================================
+function handleReceiptPhoto(msg, chatId) {
+  const currency = getCurrency(chatId);
+  const members = getMembers(chatId);
+  const senderName = msg.from.first_name || "User";
+  const caption = (msg.caption || "").trim();
+
+  sendMessage(chatId, "🔍 Scanning receipt...");
+
+  // Use the largest available photo size
+  const fileId = msg.photo[msg.photo.length - 1].file_id;
+  const fileRes = UrlFetchApp.fetch(
+    `${TG_API}/getFile?file_id=${encodeURIComponent(fileId)}`,
+    { muteHttpExceptions: true }
+  );
+  const fileData = JSON.parse(fileRes.getContentText());
+  if (!fileData.ok) {
+    sendMessage(chatId, "⚠️ Could not retrieve photo. Please try again.");
+    return;
+  }
+
+  const filePath = fileData.result.file_path;
+  const imgRes = UrlFetchApp.fetch(
+    `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`,
+    { muteHttpExceptions: true }
+  );
+  const base64 = Utilities.base64Encode(imgRes.getContent());
+  const mimeType = filePath.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+
+  const memberList = members.join(", ");
+  const captionHint = caption ? `\nCaption from user: "${caption}"` : "";
+  const amountRules = currency.shorthands
+    ? `Currency: ${currency.name} (${currency.code}). Return amount as a plain integer.`
+    : `Currency: ${currency.name} (${currency.code}). Amount with up to ${currency.decimals} decimal places.`;
+
+  const prompt = `You are a receipt scanner for a group expense tracker.
+Analyze this receipt image and extract the total expense.
+${amountRules}
+Trip members (valid payer names): ${memberList}${captionHint}
+
+If the caption names a trip member, use them as paidBy. Otherwise use: "${senderName}".
+
+Return ONLY a raw JSON object (no markdown fences, no explanation):
+{
+  "type": "expense",
+  "amount": <total as number>,
+  "note": "<brief what the receipt is for>",
+  "category": "Food | Transport | Accommodation | Activities | Shopping | Other",
+  "paidBy": "<Name in Title Case>",
+  "reaction": "<short friendly reply with emojis>",
+  "items": ["<item>: <amount>"]
+}`;
+
+  let parsed;
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
+    const res = UrlFetchApp.fetch(url, {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType, data: base64 } }] }]
+      }),
+      muteHttpExceptions: true,
+    });
+    const data = JSON.parse(res.getContentText());
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+  } catch (err) {
+    Logger.log("Receipt OCR error: " + err);
+    sendMessage(chatId, "🤔 Couldn't read the receipt. Try a clearer, straighter photo.");
+    return;
+  }
+
+  if (!parsed?.amount) {
+    sendMessage(chatId, "🤔 No amount found on the receipt. Try a clearer photo.");
+    return;
+  }
+
+  parsed.amount = Number(parsed.amount);
+  appendToSheet(parsed, senderName, chatId);
+  const paidByLabel = parsed.paidBy || senderName;
+  let reply =
+    `🧾 <b>Receipt scanned!</b>\n` +
+    `✅ <b>${parsed.note || "Receipt"}</b> ${formatAmount(parsed.amount, currency)}\n` +
+    `🏷️ Category: <b>${parsed.category || "Other"}</b>\n` +
+    `👤 Paid by: <b>${paidByLabel}</b>`;
+  if (Array.isArray(parsed.items) && parsed.items.length > 0) {
+    reply += `\n\n<b>Items:</b>\n` + parsed.items.map(i => `• ${i}`).join("\n");
+  }
+  if (parsed.reaction) reply += `\n\n${parsed.reaction}`;
+  sendChunked(chatId, reply, "HTML");
+}
+
+// =====================================================
+// HISTORY — list and delete transactions by row ID
+// =====================================================
+function listTransactions(chatId, n) {
+  const count = Math.min(Math.max(parseInt(n) || 10, 1), 50);
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(tabName);
+  if (!sh || sh.getLastRow() <= 1) return "📭 No transactions recorded yet.";
+
+  const lastRow = sh.getLastRow();
+  const startRow = Math.max(2, lastRow - count + 1);
+  const numRows = lastRow - startRow + 1;
+  const data = sh.getRange(startRow, 1, numRows, sh.getLastColumn()).getValues();
+
+  let result = `📋 <b>Last ${numRows} transaction${numRows !== 1 ? "s" : ""}</b>\n`;
+  result += `<i>Use /delete &lt;id&gt; to remove one.</i>\n\n`;
+
+  // Show most-recent first
+  for (let i = data.length - 1; i >= 0; i--) {
+    const rowNum = startRow + i;
+    const [ts, , type, amt, note, , paidBy] = data[i];
+    const date = ts ? `${new Date(ts).getMonth() + 1}/${new Date(ts).getDate()}` : "?";
+    const emoji = type?.toLowerCase() === "income" ? "💰" : "💸";
+    result += `<code>#${rowNum}</code> ${emoji} [${date}] <b>${note || "?"}</b> ${formatAmount(Number(amt || 0), currency)} — ${paidBy || "?"}\n`;
+  }
+  return result;
+}
+
+// Deletes a row by sheet row number. Returns the deleted row array, or null if not found.
+function deleteTransactionById(chatId, rowNum) {
+  const tabName = getSheetTabName(chatId);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(tabName);
+  if (!sh || rowNum <= 1 || rowNum > sh.getLastRow()) return null;
+  const row = sh.getRange(rowNum, 1, 1, sh.getLastColumn()).getValues()[0];
+  try {
+    sh.deleteRow(rowNum);
+    // If the undo pointer was pointing at this row, invalidate it
+    const props = PropertiesService.getScriptProperties();
+    if (Number(props.getProperty(`LAST_UNDO_ROW_${chatId}`)) === rowNum) {
+      props.deleteProperty(`LAST_UNDO_ROW_${chatId}`);
+    }
+    return row;
+  } catch (err) {
+    Logger.log("deleteTransactionById error: " + err);
+    return null;
+  }
+}
+
+// =====================================================
+// TRIP LIFECYCLE — archive current tab, start fresh
+// =====================================================
+function startNewTrip(chatId, tripName) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const props = PropertiesService.getScriptProperties();
+  const date = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyyMMdd");
+
+  // Archive the current tab
+  const oldTabName = getSheetTabName(chatId);
+  const oldSheet = ss.getSheetByName(oldTabName);
+  let archivedTab = `${oldTabName}_${date}`;
+  if (oldSheet) {
+    let suffix = 1;
+    while (ss.getSheetByName(archivedTab)) archivedTab = `${oldTabName}_${date}_${suffix++}`;
+    oldSheet.setName(archivedTab);
+  }
+
+  // Determine new tab name; avoid collision
+  let newTab = tripName ? tripName : `Trip_${date}`;
+  let cnt = 1;
+  while (ss.getSheetByName(newTab)) newTab = `${tripName || "Trip_" + date}_${cnt++}`;
+
+  // Update the cached tab name and clear stale undo pointer
+  props.setProperty(`SHEET_TAB_${chatId}`, newTab);
+  props.deleteProperty(`LAST_UNDO_ROW_${chatId}`);
+  ensureSheet(chatId); // creates fresh tab with headers
+  return { archivedTab, newTab };
+}
+
+// =====================================================
+// REMINDER TOGGLE — per-chat on/off for daily jobs
+// =====================================================
+function isRemindersEnabled(chatId) {
+  return PropertiesService.getScriptProperties().getProperty(`REMINDERS_OFF_${chatId}`) !== "true";
+}
+
+function setRemindersEnabled(chatId, enabled) {
+  const props = PropertiesService.getScriptProperties();
+  if (enabled) {
+    props.deleteProperty(`REMINDERS_OFF_${chatId}`);
+  } else {
+    props.setProperty(`REMINDERS_OFF_${chatId}`, "true");
+  }
+}
+
+// =====================================================
 // HELPER — convert a string to Title Case
 // =====================================================
 function toTitleCase(str) {
@@ -811,14 +1146,16 @@ function sendMessage(chatId, text, mode = "HTML", buttons = null) {
 // DAILY JOBS
 // =====================================================
 function dailyReminderJob() {
+  if (!isRemindersEnabled(ADMIN_CHAT_ID)) return;
   const message = "💡 Time to log your expenses!\nHave you added today's costs? 📝";
   const buttons = [[{ text: "📅 Today by Person", callback_data: "/today" }, { text: "✈️ Trip Summary", callback_data: "/trip" }]];
   sendMessage(ADMIN_CHAT_ID, message, "Markdown", buttons);
 }
 
 function dailyReportJob() {
+  if (!isRemindersEnabled(ADMIN_CHAT_ID)) return;
   const report = getTodayByPerson(ADMIN_CHAT_ID);
-  sendMessage(ADMIN_CHAT_ID, "⏰ 21:00 – Daily Report:\n\n" + report, "HTML");
+  sendChunked(ADMIN_CHAT_ID, "⏰ 21:00 – Daily Report:\n\n" + report, "HTML");
 }
 
 function doGet() {
