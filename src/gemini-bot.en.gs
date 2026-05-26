@@ -170,6 +170,13 @@ function doPost(e) {
     const chatId = msg.chat.id;
     const text = msg.text?.trim() || "";
 
+    // Bot added to a group: send the setup guide automatically
+    if (msg.new_chat_members?.some(u => u.is_bot)) {
+      ensureSheet(chatId);
+      sendWelcome(chatId, msg.from.first_name);
+      return HtmlService.createHtmlOutput("ok");
+    }
+
     // Receipt OCR: handle photo messages before the text guard
     if (msg.photo) {
       handleReceiptPhoto(msg, chatId);
@@ -190,7 +197,13 @@ function doPost(e) {
     // =====================================================
     // BASIC COMMANDS
     // =====================================================
-    if (command === "/start" || command === "/help") {
+    if (command === "/start") {
+      ensureSheet(chatId);
+      sendWelcome(chatId, msg.from.first_name);
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    if (command === "/help") {
       ensureSheet(chatId);
       const supported = Object.keys(CURRENCIES).join(", ");
       const helpText =
@@ -1326,6 +1339,47 @@ function searchTransactions(chatId, keyword) {
 // =====================================================
 function toTitleCase(str) {
   return str.replace(/\w\S*/g, txt => txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase());
+}
+
+// =====================================================
+// ONBOARDING — sent on /start and when bot is added to a group
+// =====================================================
+function sendWelcome(chatId, adderName) {
+  const props = PropertiesService.getScriptProperties();
+  const currency = getCurrency(chatId);
+  const members = getMembers(chatId);
+  const tz = getTimezone(chatId);
+  const scriptTz = Session.getScriptTimeZone();
+
+  const tzSet     = props.getProperty(`TIMEZONE_${chatId}`) !== null;
+  const curSet    = props.getProperty(`CURRENCY_${chatId}`) !== null;
+  const membersSet = hasCustomMembers(chatId);
+
+  const tzLine      = tzSet      ? `✅ Timezone: \`${tz}\`` : `⚙️ Timezone not set (using \`${scriptTz}\`)\n   → \`/settimezone Asia/Seoul\``;
+  const curLine     = curSet     ? `✅ Currency: ${currency.code} (${currency.symbol})` : `⚙️ Currency: ${currency.code} (${currency.symbol}) _(default)_\n   → \`/setcurrency KRW\``;
+  const membersLine = membersSet ? `✅ Members: ${members.join(", ")}` : `⚙️ Members: ${members.join(", ")} _(default)_\n   → \`/setmembers Sayuri Chloe\``;
+
+  const allDone = tzSet && curSet && membersSet;
+  const greeting = adderName ? `Thanks for adding me, *${adderName}*! ` : "";
+
+  const msg =
+    `👋 ${greeting}I'm *Gemini Finance Bot* 💰\n` +
+    `I track group trip expenses and calculate who owes whom.\n\n` +
+    `*── Setup checklist ──*\n\n` +
+    `${tzLine}\n\n` +
+    `${curLine}\n\n` +
+    `${membersLine}\n\n` +
+    (allDone
+      ? `✨ *You're all set!*\n\n`
+      : `Run the commands above to complete setup.\n\n`) +
+    `*── Then just send expenses ──*\n\n` +
+    `\`coffee 10k sayuri\`\n` +
+    `\`lunch 25000 - chloe\`\n` +
+    `\`hotel 150000\` _(payer = you)_\n` +
+    `📷 Or send a *receipt photo* to scan it!\n\n` +
+    `Use /help to see all commands.`;
+
+  sendMessage(chatId, msg, "Markdown");
 }
 
 // =====================================================
