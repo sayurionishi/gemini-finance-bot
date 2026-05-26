@@ -151,7 +151,20 @@ function getSheetTabName(chatId) {
 function doPost(e) {
   try {
     const update = JSON.parse(e.postData.contents);
-    const msg = update.message;
+
+    // Normalize callback_query (inline button tap) into a message-like object
+    // so the rest of the routing handles it identically to a typed command.
+    let msg = update.message;
+    if (!msg && update.callback_query) {
+      const cb = update.callback_query;
+      answerCallbackQuery(cb.id); // dismiss the button spinner immediately
+      msg = {
+        from: cb.from,
+        chat: cb.message?.chat || { id: cb.from.id },
+        text: cb.data,
+      };
+    }
+
     if (!msg || msg.from?.is_bot) return HtmlService.createHtmlOutput("ignored");
 
     const chatId = msg.chat.id;
@@ -1316,7 +1329,7 @@ function toTitleCase(str) {
 }
 
 // =====================================================
-// TELEGRAM HANDLER
+// TELEGRAM HANDLERS
 // =====================================================
 function sendMessage(chatId, text, mode = "HTML", buttons = null) {
   const payload = { chat_id: chatId, text, parse_mode: mode };
@@ -1325,6 +1338,15 @@ function sendMessage(chatId, text, mode = "HTML", buttons = null) {
     method: "post",
     contentType: "application/json",
     payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+}
+
+function answerCallbackQuery(callbackQueryId) {
+  UrlFetchApp.fetch(`${TG_API}/answerCallbackQuery`, {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify({ callback_query_id: callbackQueryId }),
     muteHttpExceptions: true,
   });
 }
