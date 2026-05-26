@@ -277,7 +277,7 @@ function doPost(e) {
         const current = getMembers(chatId);
         const label = hasCustomMembers(chatId) ? "" : " <i>(default)</i>";
         sendMessage(chatId,
-          `👥 <b>Current members:</b> ${current.join(", ")}${label}\n\n` +
+          `👥 <b>Current members:</b> ${escapeHtml(current.join(", "))}${label}\n\n` +
           `Set new list:\n` +
           `<code>/setmembers Sayuri Chloe Alex</code>\n` +
           `<code>/setmembers Sayuri, Chloe, Alex</code>`,
@@ -289,7 +289,7 @@ function doPost(e) {
       const names = rawNames.map(s => toTitleCase(s.trim())).filter(Boolean);
       if (setMembers(chatId, names)) {
         sendMessage(chatId,
-          `✅ Members set to: <b>${names.join(", ")}</b>\n\n` +
+          `✅ Members set to: <b>${escapeHtml(names.join(", "))}</b>\n\n` +
           `Future transactions will recognize these names. ` +
           `Existing data is untouched — old payers still appear in /settle.`,
           "HTML");
@@ -325,7 +325,7 @@ function doPost(e) {
       if (!tz) {
         const current = getTimezone(chatId);
         sendMessage(chatId,
-          `🕐 <b>Current timezone:</b> <code>${current}</code>\n\n` +
+          `🕐 <b>Current timezone:</b> <code>${escapeHtml(current)}</code>\n\n` +
           `Set a new timezone:\n<code>/settimezone Asia/Seoul</code>\n` +
           `<code>/settimezone Pacific/Auckland</code>\n\n` +
           `Uses IANA timezone IDs (e.g. America/New_York, Europe/London).`,
@@ -335,13 +335,13 @@ function doPost(e) {
       if (setTimezone(chatId, tz)) {
         const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm");
         sendMessage(chatId,
-          `✅ Timezone set to <b>${tz}</b>\n` +
+          `✅ Timezone set to <b>${escapeHtml(tz)}</b>\n` +
           `Current time there: <code>${nowStr}</code>\n\n` +
           `/today and date-based reports now use this timezone.`,
           "HTML");
       } else {
         sendMessage(chatId,
-          `⚠️ Unknown timezone: <code>${tz}</code>\n\n` +
+          `⚠️ Unknown timezone: <code>${escapeHtml(tz)}</code>\n\n` +
           `Use IANA timezone IDs. Examples:\n` +
           `<code>Asia/Seoul</code> · <code>Pacific/Auckland</code> · <code>America/New_York</code>`,
           "HTML");
@@ -443,16 +443,16 @@ function doPost(e) {
         return HtmlService.createHtmlOutput("ok");
       }
       const result = editTransaction(chatId, rowNum, field, value, currency);
-      if (result === "notfound") {
+      if (result.error === "notfound") {
         sendMessage(chatId, `⚠️ Transaction <code>#${rowNum}</code> not found. Use /list to see valid IDs.`, "HTML");
-      } else if (result === "badfield") {
+      } else if (result.error === "badfield") {
         sendMessage(chatId, `⚠️ Unknown field "<b>${escapeHtml(field)}</b>".\nValid: <code>note</code>, <code>amount</code>, <code>payer</code>, <code>category</code>`, "HTML");
-      } else if (result === "badamount") {
+      } else if (result.error === "badamount") {
         sendMessage(chatId, "⚠️ Invalid amount — please provide a number.", "HTML");
-      } else if (result === "badcategory") {
+      } else if (result.error === "badcategory") {
         sendMessage(chatId, "⚠️ Invalid category.\nOptions: Food, Transport, Accommodation, Activities, Shopping, Other", "HTML");
       } else {
-        sendMessage(chatId, `✅ Transaction <code>#${rowNum}</code> updated: <b>${escapeHtml(field)}</b> → ${escapeHtml(result)}`, "HTML");
+        sendMessage(chatId, `✅ Transaction <code>#${rowNum}</code> updated: <b>${escapeHtml(field)}</b> → ${escapeHtml(result.display)}`, "HTML");
       }
       return HtmlService.createHtmlOutput("ok");
     }
@@ -475,10 +475,13 @@ function doPost(e) {
     if (commandBase === "/newtrip") {
       const tripName = args ? args.substring(0, 30) : "";
       const result = startNewTrip(chatId, tripName);
+      const archivedLine = result.archivedTab
+        ? `📦 Old data archived: <code>${escapeHtml(result.archivedTab)}</code>\n`
+        : "";
       sendMessage(chatId,
         `🗂️ <b>New trip started!</b>\n\n` +
-        `📦 Old data archived: <code>${result.archivedTab}</code>\n` +
-        `✨ New tab: <code>${result.newTab}</code>\n\n` +
+        archivedLine +
+        `✨ New tab: <code>${escapeHtml(result.newTab)}</code>\n\n` +
         `All commands now record to the new tab. Old data is preserved.`,
         "HTML");
       return HtmlService.createHtmlOutput("ok");
@@ -1211,16 +1214,21 @@ function startNewTrip(chatId, tripName) {
     oldSheet.setName(archivedTab);
   }
 
+  // Sheets tab names can't contain : \ / ? * [ ] — strip them so a trip name
+  // like "Korea: Spring" doesn't make insertSheet throw.
+  const cleanName = tripName ? tripName.replace(/[:\\/?*\[\]]/g, " ").replace(/\s+/g, " ").trim() : "";
+
   // Determine new tab name; avoid collision
-  let newTab = tripName ? tripName : `Trip_${date}`;
+  const base = cleanName || `Trip_${date}`;
+  let newTab = base;
   let cnt = 1;
-  while (ss.getSheetByName(newTab)) newTab = `${tripName || "Trip_" + date}_${cnt++}`;
+  while (ss.getSheetByName(newTab)) newTab = `${base}_${cnt++}`;
 
   // Update the cached tab name and clear stale undo pointer
   props.setProperty(`SHEET_TAB_${chatId}`, newTab);
   props.deleteProperty(`LAST_UNDO_ROW_${chatId}`);
   ensureSheet(chatId); // creates fresh tab with headers
-  return { archivedTab, newTab };
+  return { archivedTab: oldSheet ? archivedTab : null, newTab };
 }
 
 // =====================================================
@@ -1256,7 +1264,9 @@ function getTimezone(chatId) {
 // every date, while any real non-UTC zone differs at least once across the
 // year (this also tolerates DST-only-GMT zones like Europe/London).
 function isValidTimezone(tz) {
-  if (!tz || !/^(UTC|GMT|[A-Za-z]+\/[A-Za-z_]+(\/[A-Za-z_]+)?)$/.test(tz)) return false;
+  // Allow IANA IDs (Region/City, optionally 3-part) plus digits, +, - in the
+  // city part for zones like Etc/GMT+5 and America/Port-au-Prince.
+  if (!tz || !/^(UTC|GMT|[A-Za-z]+\/[A-Za-z0-9+_-]+(\/[A-Za-z0-9+_-]+)?)$/.test(tz)) return false;
   if (tz === "UTC" || tz === "GMT") return true;
   try {
     const jan = Utilities.formatDate(new Date(Date.UTC(2025, 0, 1, 12)), tz, "Z");
@@ -1282,7 +1292,7 @@ function editTransaction(chatId, rowNum, field, value, currency) {
   const tabName = getSheetTabName(chatId);
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const sh = ss.getSheetByName(tabName);
-  if (!sh || rowNum <= 1 || rowNum > sh.getLastRow()) return "notfound";
+  if (!sh || rowNum <= 1 || rowNum > sh.getLastRow()) return { error: "notfound" };
 
   const VALID_CATEGORIES = ["Food", "Transport", "Accommodation", "Activities", "Shopping", "Other"];
   let col, newValue, display;
@@ -1293,7 +1303,7 @@ function editTransaction(chatId, rowNum, field, value, currency) {
       col = 5; newValue = value; display = value; break;
     case "amount": {
       const num = parseAmountInput(value);
-      if (!num || isNaN(num) || num <= 0) return "badamount";
+      if (!num || isNaN(num) || num <= 0) return { error: "badamount" };
       col = 4; newValue = num; display = formatAmount(num, currency); break;
     }
     case "payer":
@@ -1301,19 +1311,19 @@ function editTransaction(chatId, rowNum, field, value, currency) {
       col = 7; newValue = toTitleCase(value); display = newValue; break;
     case "category": {
       const cat = toTitleCase(value.split(/\s+/)[0]);
-      if (!VALID_CATEGORIES.includes(cat)) return "badcategory";
+      if (!VALID_CATEGORIES.includes(cat)) return { error: "badcategory" };
       col = 6; newValue = cat; display = cat; break;
     }
     default:
-      return "badfield";
+      return { error: "badfield" };
   }
 
   try {
     sh.getRange(rowNum, col).setValue(newValue);
-    return display;
+    return { display };
   } catch (err) {
     Logger.log("editTransaction error: " + err);
-    return "notfound";
+    return { error: "notfound" };
   }
 }
 
