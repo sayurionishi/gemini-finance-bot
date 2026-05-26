@@ -14,6 +14,11 @@ const ADMIN_CHAT_ID = 'YOUR_CHAT_ID';
 const REMIND_HOUR   = 20;
 const REPORT_HOUR   = 21;
 
+// Defaults applied to a chat until it overrides them with /setcurrency or
+// /settimezone. DEFAULT_CURRENCY must be a key in CURRENCIES below.
+const DEFAULT_CURRENCY = "NZD";
+const DEFAULT_TIMEZONE = "Pacific/Auckland";
+
 // Default member roster used when a chat hasn't set its own via /setmembers.
 // Per-chat rosters take precedence — see getMembers().
 const TRIP_MEMBERS = ["Sayuri", "Chloe"];
@@ -37,8 +42,8 @@ const CURRENCIES = {
 
 // Returns the currency config for a chat. Defaults to KRW.
 function getCurrency(chatId) {
-  const code = PropertiesService.getScriptProperties().getProperty(`CURRENCY_${chatId}`) || "KRW";
-  return CURRENCIES[code] || CURRENCIES.KRW;
+  const code = PropertiesService.getScriptProperties().getProperty(`CURRENCY_${chatId}`) || DEFAULT_CURRENCY;
+  return CURRENCIES[code] || CURRENCIES[DEFAULT_CURRENCY] || CURRENCIES.KRW;
 }
 
 // Stores the currency choice for a chat. Returns false if code is unknown.
@@ -1238,6 +1243,7 @@ function setRemindersEnabled(chatId, enabled) {
 // Returns the chat's configured timezone, or the Apps Script project default.
 function getTimezone(chatId) {
   return PropertiesService.getScriptProperties().getProperty(`TIMEZONE_${chatId}`)
+    || DEFAULT_TIMEZONE
     || Session.getScriptTimeZone();
 }
 
@@ -1390,17 +1396,15 @@ function sendWelcome(chatId, adderName) {
   const currency = getCurrency(chatId);
   const members = getMembers(chatId);
   const tz = getTimezone(chatId);
-  const scriptTz = Session.getScriptTimeZone();
 
   const tzSet     = props.getProperty(`TIMEZONE_${chatId}`) !== null;
   const curSet    = props.getProperty(`CURRENCY_${chatId}`) !== null;
   const membersSet = hasCustomMembers(chatId);
 
   const safeTz = escapeHtml(tz);
-  const safeScriptTz = escapeHtml(scriptTz);
   const safeMembers = escapeHtml(members.join(", "));
 
-  const tzLine      = tzSet      ? `✅ Timezone: <code>${safeTz}</code>` : `⚙️ Timezone not set (using <code>${safeScriptTz}</code>)\n   → <code>/settimezone Asia/Seoul</code>`;
+  const tzLine      = tzSet      ? `✅ Timezone: <code>${safeTz}</code>` : `⚙️ Timezone: <code>${safeTz}</code> <i>(default)</i>\n   → <code>/settimezone Asia/Seoul</code>`;
   const curLine     = curSet     ? `✅ Currency: ${currency.code} (${currency.symbol})` : `⚙️ Currency: ${currency.code} (${currency.symbol}) <i>(default)</i>\n   → <code>/setcurrency KRW</code>`;
   const membersLine = membersSet ? `✅ Members: ${safeMembers}` : `⚙️ Members: ${safeMembers} <i>(default)</i>\n   → <code>/setmembers Sayuri Chloe</code>`;
 
