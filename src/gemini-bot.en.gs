@@ -24,16 +24,17 @@ const DEFAULT_TIMEZONE = "Pacific/Auckland";
 const TRIP_MEMBERS = ["Sayuri", "Chloe"];
 
 // Supported currencies — extend as needed.
-// shorthands: true enables "10k" = 10,000 / "1.5k" = 1,500 parsing in Gemini.
+// k/m shorthand ("10k" = 10,000) works for every currency; only decimals
+// differ (0 for KRW/JPY, 2 for the rest).
 const CURRENCIES = {
-  KRW: { code: "KRW", symbol: "₩", decimals: 0, name: "Korean Won",       shorthands: true  },
-  NZD: { code: "NZD", symbol: "$", decimals: 2, name: "NZ Dollar",         shorthands: false },
-  USD: { code: "USD", symbol: "$", decimals: 2, name: "US Dollar",         shorthands: false },
-  AUD: { code: "AUD", symbol: "$", decimals: 2, name: "AU Dollar",         shorthands: false },
-  PHP: { code: "PHP", symbol: "₱", decimals: 2, name: "Philippine Peso",   shorthands: false },
-  EUR: { code: "EUR", symbol: "€", decimals: 2, name: "Euro",              shorthands: false },
-  GBP: { code: "GBP", symbol: "£", decimals: 2, name: "British Pound",     shorthands: false },
-  JPY: { code: "JPY", symbol: "¥", decimals: 0, name: "Japanese Yen",      shorthands: false },
+  KRW: { code: "KRW", symbol: "₩", decimals: 0, name: "Korean Won"     },
+  NZD: { code: "NZD", symbol: "$", decimals: 2, name: "NZ Dollar"      },
+  USD: { code: "USD", symbol: "$", decimals: 2, name: "US Dollar"      },
+  AUD: { code: "AUD", symbol: "$", decimals: 2, name: "AU Dollar"      },
+  PHP: { code: "PHP", symbol: "₱", decimals: 2, name: "Philippine Peso" },
+  EUR: { code: "EUR", symbol: "€", decimals: 2, name: "Euro"          },
+  GBP: { code: "GBP", symbol: "£", decimals: 2, name: "British Pound" },
+  JPY: { code: "JPY", symbol: "¥", decimals: 0, name: "Japanese Yen"  },
 };
 
 // =====================================================
@@ -218,8 +219,8 @@ function doPost(e) {
         "👋 Hello *" + (msg.from.first_name || "there") + "!*\n\n" +
         "I'm *Gemini Finance Bot* 💰 – your expense tracker.\n\n" +
         "🧾 Log expenses naturally:\n" +
-        "• `lunch 10k sayuri` (KRW shorthand)\n" +
-        "• `coffee 5.50 - chloe` (decimal currency)\n" +
+        "• `lunch 10k sayuri` (k = ×1,000, any currency)\n" +
+        "• `coffee 5.50 - chloe` (decimals where supported)\n" +
         "• Multi-line: send several transactions at once\n" +
         "• 📷 Send a receipt photo to scan it automatically!\n\n" +
         "📊 Report commands:\n" +
@@ -603,9 +604,11 @@ function doPost(e) {
 function parseAndReactWithGemini(text, userName, currency, members) {
   try {
     const memberList = members.join(", ");
-    const amountRules = currency.shorthands
-      ? `- "10k" means 10,000, "1.5k" means 1,500, "10m" means 10,000,000\n- Currency is ${currency.name} (${currency.code}). Return amount as a plain integer.`
-      : `- Currency is ${currency.name} (${currency.code}). Return amount as a number with up to ${currency.decimals} decimal places (e.g. 5.50).`;
+    const decimalRule = currency.decimals === 0
+      ? `Currency is ${currency.name} (${currency.code}). Return amount as a plain integer.`
+      : `Currency is ${currency.name} (${currency.code}). Return amount as a number with up to ${currency.decimals} decimal places (e.g. 5.50).`;
+    const amountRules =
+      `- "10k" means 10,000, "1.5k" means 1,500, "10m" means 10,000,000 (any currency)\n- ${decimalRule}`;
 
     const prompt = `
 You are a friendly group expense assistant.
@@ -1076,7 +1079,7 @@ function handleReceiptPhoto(msg, chatId) {
 
   const memberList = members.join(", ");
   const captionHint = caption ? `\nCaption from user: "${caption}"` : "";
-  const amountRules = currency.shorthands
+  const amountRules = currency.decimals === 0
     ? `Currency: ${currency.name} (${currency.code}). Return amount as a plain integer.`
     : `Currency: ${currency.name} (${currency.code}). Amount with up to ${currency.decimals} decimal places.`;
 
@@ -1289,7 +1292,7 @@ function editTransaction(chatId, rowNum, field, value, currency) {
     case "description":
       col = 5; newValue = value; display = value; break;
     case "amount": {
-      const num = parseAmountInput(value, currency);
+      const num = parseAmountInput(value);
       if (!num || isNaN(num) || num <= 0) return "badamount";
       col = 4; newValue = num; display = formatAmount(num, currency); break;
     }
@@ -1375,16 +1378,14 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;");
 }
 
-// Parses a user-typed amount, honoring the chat currency's k/m shorthand
-// exactly like the natural-language flow. Returns NaN for invalid input,
-// including shorthand suffixes on currencies that don't support them.
-function parseAmountInput(value, currency) {
+// Parses a user-typed amount, honoring k/m shorthand ("10k" = 10,000),
+// which applies to every currency. Returns NaN for invalid input.
+function parseAmountInput(value) {
   const s = String(value).trim().toLowerCase().replace(/,/g, "");
   const m = s.match(/^([0-9]*\.?[0-9]+)\s*([km])?$/);
   if (!m) return NaN;
   const num = parseFloat(m[1]);
   if (!m[2]) return num;
-  if (!currency.shorthands) return NaN; // "10k" is meaningless for e.g. NZD
   return num * (m[2] === "k" ? 1000 : 1000000);
 }
 

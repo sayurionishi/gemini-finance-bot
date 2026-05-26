@@ -245,7 +245,7 @@ The bot understands natural language. Just include the amount and optionally the
 | `coffee 5500` | ₩5,500 for coffee, paid by the message sender |
 | `subway 1.5k` | ₩1,500 for subway (shorthand: `k` = ×1,000) |
 
-**Amount shorthands:** `10k` = ₩10,000 · `1.5k` = ₩1,500 · `10m` = ₩10,000,000
+**Amount shorthands:** `10k` = 10,000 · `1.5k` = 1,500 · `10m` = 10,000,000. Works for every currency (e.g. `10k php` = ₱10,000).
 
 If no name is detected, the **Telegram sender’s first name** is used as the payer.  
 Names are always normalized to Title Case.
