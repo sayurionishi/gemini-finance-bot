@@ -370,8 +370,7 @@ function doPost(e) {
     }
 
     if (commandBase === "/person") {
-      // Only take the first token — "/person Sayuri loves coffee" → "Sayuri"
-      const name = args ? toTitleCase(args.split(/\s+/)[0]) : "";
+      const name = args ? toTitleCase(args) : "";
       sendChunked(chatId, getPersonTransactions(name, chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
