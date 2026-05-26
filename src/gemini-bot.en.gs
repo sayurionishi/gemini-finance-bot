@@ -14,21 +14,27 @@ const ADMIN_CHAT_ID = 'YOUR_CHAT_ID';
 const REMIND_HOUR   = 20;
 const REPORT_HOUR   = 21;
 
+// Defaults applied to a chat until it overrides them with /setcurrency or
+// /settimezone. DEFAULT_CURRENCY must be a key in CURRENCIES below.
+const DEFAULT_CURRENCY = "NZD";
+const DEFAULT_TIMEZONE = "Pacific/Auckland";
+
 // Default member roster used when a chat hasn't set its own via /setmembers.
 // Per-chat rosters take precedence — see getMembers().
 const TRIP_MEMBERS = ["Sayuri", "Chloe"];
 
 // Supported currencies — extend as needed.
-// shorthands: true enables "10k" = 10,000 / "1.5k" = 1,500 parsing in Gemini.
+// k/m shorthand ("10k" = 10,000) works for every currency; only decimals
+// differ (0 for KRW/JPY, 2 for the rest).
 const CURRENCIES = {
-  KRW: { code: "KRW", symbol: "₩", decimals: 0, name: "Korean Won",       shorthands: true  },
-  NZD: { code: "NZD", symbol: "$", decimals: 2, name: "NZ Dollar",         shorthands: false },
-  USD: { code: "USD", symbol: "$", decimals: 2, name: "US Dollar",         shorthands: false },
-  AUD: { code: "AUD", symbol: "$", decimals: 2, name: "AU Dollar",         shorthands: false },
-  PHP: { code: "PHP", symbol: "₱", decimals: 2, name: "Philippine Peso",   shorthands: false },
-  EUR: { code: "EUR", symbol: "€", decimals: 2, name: "Euro",              shorthands: false },
-  GBP: { code: "GBP", symbol: "£", decimals: 2, name: "British Pound",     shorthands: false },
-  JPY: { code: "JPY", symbol: "¥", decimals: 0, name: "Japanese Yen",      shorthands: false },
+  KRW: { code: "KRW", symbol: "₩", decimals: 0, name: "Korean Won"     },
+  NZD: { code: "NZD", symbol: "$", decimals: 2, name: "NZ Dollar"      },
+  USD: { code: "USD", symbol: "$", decimals: 2, name: "US Dollar"      },
+  AUD: { code: "AUD", symbol: "$", decimals: 2, name: "AU Dollar"      },
+  PHP: { code: "PHP", symbol: "₱", decimals: 2, name: "Philippine Peso" },
+  EUR: { code: "EUR", symbol: "€", decimals: 2, name: "Euro"          },
+  GBP: { code: "GBP", symbol: "£", decimals: 2, name: "British Pound" },
+  JPY: { code: "JPY", symbol: "¥", decimals: 0, name: "Japanese Yen"  },
 };
 
 // =====================================================
@@ -37,8 +43,8 @@ const CURRENCIES = {
 
 // Returns the currency config for a chat. Defaults to KRW.
 function getCurrency(chatId) {
-  const code = PropertiesService.getScriptProperties().getProperty(`CURRENCY_${chatId}`) || "KRW";
-  return CURRENCIES[code] || CURRENCIES.KRW;
+  const code = PropertiesService.getScriptProperties().getProperty(`CURRENCY_${chatId}`) || DEFAULT_CURRENCY;
+  return CURRENCIES[code] || CURRENCIES[DEFAULT_CURRENCY] || CURRENCIES.KRW;
 }
 
 // Stores the currency choice for a chat. Returns false if code is unknown.
@@ -151,11 +157,34 @@ function getSheetTabName(chatId) {
 function doPost(e) {
   try {
     const update = JSON.parse(e.postData.contents);
-    const msg = update.message;
+
+    // Normalize callback_query (inline button tap) into a message-like object
+    // so the rest of the routing handles it identically to a typed command.
+    let msg = update.message;
+    if (!msg && update.callback_query) {
+      const cb = update.callback_query;
+      answerCallbackQuery(cb.id); // dismiss the button spinner immediately
+      msg = {
+        from: cb.from,
+        chat: cb.message?.chat || { id: cb.from.id },
+        text: cb.data,
+      };
+    }
+
     if (!msg || msg.from?.is_bot) return HtmlService.createHtmlOutput("ignored");
 
     const chatId = msg.chat.id;
     const text = msg.text?.trim() || "";
+
+    // Bot added to a group: send the setup guide automatically.
+    // The bot's own user ID is the numeric prefix of its token, so we welcome
+    // only when THIS bot joins — not when any other bot is added.
+    const botId = Number(BOT_TOKEN.split(":")[0]);
+    if (msg.new_chat_members?.some(u => u.id === botId)) {
+      ensureSheet(chatId);
+      sendWelcome(chatId, msg.from.first_name);
+      return HtmlService.createHtmlOutput("ok");
+    }
 
     // Receipt OCR: handle photo messages before the text guard
     if (msg.photo) {
@@ -177,15 +206,21 @@ function doPost(e) {
     // =====================================================
     // BASIC COMMANDS
     // =====================================================
-    if (command === "/start" || command === "/help") {
+    if (command === "/start") {
+      ensureSheet(chatId);
+      sendWelcome(chatId, msg.from.first_name);
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    if (command === "/help") {
       ensureSheet(chatId);
       const supported = Object.keys(CURRENCIES).join(", ");
       const helpText =
         "👋 Hello *" + (msg.from.first_name || "there") + "!*\n\n" +
         "I'm *Gemini Finance Bot* 💰 – your expense tracker.\n\n" +
         "🧾 Log expenses naturally:\n" +
-        "• `lunch 10k sayuri` (KRW shorthand)\n" +
-        "• `coffee 5.50 - chloe` (decimal currency)\n" +
+        "• `lunch 10k sayuri` (k = ×1,000, any currency)\n" +
+        "• `coffee 5.50 - chloe` (decimals where supported)\n" +
         "• Multi-line: send several transactions at once\n" +
         "• 📷 Send a receipt photo to scan it automatically!\n\n" +
         "📊 Report commands:\n" +
@@ -202,16 +237,19 @@ function doPost(e) {
         "📋 History:\n" +
         "• `/list` – Last 10 transactions with IDs\n" +
         "• `/list 20` – Last 20 transactions\n" +
-        "• `/delete <id>` – Delete transaction by ID\n\n" +
+        "• `/delete <id>` – Delete transaction by ID\n" +
+        "• `/edit <id> <field> <value>` – Edit a transaction\n" +
+        "• `/search <keyword>` – Search transactions\n\n" +
         "🗂️ Trip lifecycle:\n" +
         "• `/newtrip [name]` – Archive current trip, start fresh\n\n" +
         "🛠️ Settings & other:\n" +
         "• `/setmembers <names>` – Set trip members for this chat\n" +
         "• `/setcurrency <code>` – Set currency (" + supported + ")\n" +
+        "• `/settimezone <tz>` – Set timezone (e.g. Asia/Seoul)\n" +
         "• `/reminders on/off` – Toggle daily reminders\n" +
         "• `/undo` – Undo last transaction\n" +
         "• `/confirm` – Confirm deletion\n" +
-        "• `/whoami` – Chat ID, currency, tab & members\n\n" +
+        "• `/whoami` – Chat ID, currency, tab, timezone & members\n\n" +
         "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.\n\n" +
         "💱 Current currency: *" + currency.code + "* (" + currency.symbol + ")";
       sendMessage(chatId, helpText, "Markdown");
@@ -222,11 +260,13 @@ function doPost(e) {
       const tabName = getSheetTabName(chatId);
       const members = getMembers(chatId);
       const memberLabel = hasCustomMembers(chatId) ? "" : " <i>(default)</i>";
+      const tz = getTimezone(chatId);
       sendMessage(chatId,
         `🪪 <b>Chat ID:</b> <code>${chatId}</code>\n` +
         `💱 <b>Currency:</b> ${currency.code} (${currency.symbol})\n` +
-        `📋 <b>Sheet tab:</b> ${tabName}\n` +
-        `👥 <b>Members:</b> ${members.join(", ")}${memberLabel}`,
+        `📋 <b>Sheet tab:</b> ${escapeHtml(tabName)}\n` +
+        `👥 <b>Members:</b> ${escapeHtml(members.join(", "))}${memberLabel}\n` +
+        `🕐 <b>Timezone:</b> ${escapeHtml(tz)}`,
         "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -237,7 +277,7 @@ function doPost(e) {
         const current = getMembers(chatId);
         const label = hasCustomMembers(chatId) ? "" : " <i>(default)</i>";
         sendMessage(chatId,
-          `👥 <b>Current members:</b> ${current.join(", ")}${label}\n\n` +
+          `👥 <b>Current members:</b> ${escapeHtml(current.join(", "))}${label}\n\n` +
           `Set new list:\n` +
           `<code>/setmembers Sayuri Chloe Alex</code>\n` +
           `<code>/setmembers Sayuri, Chloe, Alex</code>`,
@@ -249,7 +289,7 @@ function doPost(e) {
       const names = rawNames.map(s => toTitleCase(s.trim())).filter(Boolean);
       if (setMembers(chatId, names)) {
         sendMessage(chatId,
-          `✅ Members set to: <b>${names.join(", ")}</b>\n\n` +
+          `✅ Members set to: <b>${escapeHtml(names.join(", "))}</b>\n\n` +
           `Future transactions will recognize these names. ` +
           `Existing data is untouched — old payers still appear in /settle.`,
           "HTML");
@@ -275,6 +315,36 @@ function doPost(e) {
           `All amounts in this chat will now use ${cur.symbol}`, "HTML");
       } else {
         sendMessage(chatId, `⚠️ Unknown currency code.\nSupported: <b>${supported}</b>`, "HTML");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /settimezone Asia/Seoul
+    if (commandBase === "/settimezone") {
+      const tz = args.split(/\s+/)[0] || "";
+      if (!tz) {
+        const current = getTimezone(chatId);
+        sendMessage(chatId,
+          `🕐 <b>Current timezone:</b> <code>${escapeHtml(current)}</code>\n\n` +
+          `Set a new timezone:\n<code>/settimezone Asia/Seoul</code>\n` +
+          `<code>/settimezone Pacific/Auckland</code>\n\n` +
+          `Uses IANA timezone IDs (e.g. America/New_York, Europe/London).`,
+          "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      if (setTimezone(chatId, tz)) {
+        const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm");
+        sendMessage(chatId,
+          `✅ Timezone set to <b>${escapeHtml(tz)}</b>\n` +
+          `Current time there: <code>${nowStr}</code>\n\n` +
+          `/today and date-based reports now use this timezone.`,
+          "HTML");
+      } else {
+        sendMessage(chatId,
+          `⚠️ Unknown timezone: <code>${escapeHtml(tz)}</code>\n\n` +
+          `Use IANA timezone IDs. Examples:\n` +
+          `<code>Asia/Seoul</code> · <code>Pacific/Auckland</code> · <code>America/New_York</code>`,
+          "HTML");
       }
       return HtmlService.createHtmlOutput("ok");
     }
@@ -309,8 +379,7 @@ function doPost(e) {
     }
 
     if (commandBase === "/person") {
-      // Only take the first token — "/person Sayuri loves coffee" → "Sayuri"
-      const name = args ? toTitleCase(args.split(/\s+/)[0]) : "";
+      const name = args ? toTitleCase(args) : "";
       sendChunked(chatId, getPersonTransactions(name, chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -348,10 +417,53 @@ function doPost(e) {
         const [, , type, amt, note, , paidBy] = deleted;
         sendMessage(chatId,
           `🗑️ Deleted <code>#${rowNum}</code>:\n` +
-          `• <b>${note || "?"}</b> ${formatAmount(Number(amt || 0), currency)}\n` +
-          `• Paid by: ${paidBy || "?"}`,
+          `• <b>${escapeHtml(note || "?")}</b> ${formatAmount(Number(amt || 0), currency)}\n` +
+          `• Paid by: ${escapeHtml(paidBy || "?")}`,
           "HTML");
       }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /edit <id> <field> <value>
+    if (commandBase === "/edit") {
+      const parts = args.split(/\s+/);
+      const rowNum = parseInt(parts[0]);
+      const field = (parts[1] || "").toLowerCase();
+      const value = parts.slice(2).join(" ").trim();
+      if (!rowNum || !field || !value) {
+        sendMessage(chatId,
+          "⚠️ Usage: <code>/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;</code>\n\n" +
+          "Fields: <code>note</code>, <code>amount</code>, <code>payer</code>, <code>category</code>\n\n" +
+          "Examples:\n" +
+          "<code>/edit 15 amount 12000</code>\n" +
+          "<code>/edit 15 note taxi to airport</code>\n" +
+          "<code>/edit 15 payer Chloe</code>\n" +
+          "<code>/edit 15 category Transport</code>\n\n" +
+          "Use /list to find the transaction ID.", "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      const result = editTransaction(chatId, rowNum, field, value, currency);
+      if (result.error === "notfound") {
+        sendMessage(chatId, `⚠️ Transaction <code>#${rowNum}</code> not found. Use /list to see valid IDs.`, "HTML");
+      } else if (result.error === "badfield") {
+        sendMessage(chatId, `⚠️ Unknown field "<b>${escapeHtml(field)}</b>".\nValid: <code>note</code>, <code>amount</code>, <code>payer</code>, <code>category</code>`, "HTML");
+      } else if (result.error === "badamount") {
+        sendMessage(chatId, "⚠️ Invalid amount — please provide a number.", "HTML");
+      } else if (result.error === "badcategory") {
+        sendMessage(chatId, "⚠️ Invalid category.\nOptions: Food, Transport, Accommodation, Activities, Shopping, Other", "HTML");
+      } else {
+        sendMessage(chatId, `✅ Transaction <code>#${rowNum}</code> updated: <b>${escapeHtml(field)}</b> → ${escapeHtml(result.display)}`, "HTML");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /search <keyword>
+    if (commandBase === "/search") {
+      if (!args) {
+        sendMessage(chatId, "⚠️ Please provide a keyword.\nExample: <code>/search coffee</code>", "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      sendChunked(chatId, searchTransactions(chatId, args), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -363,10 +475,13 @@ function doPost(e) {
     if (commandBase === "/newtrip") {
       const tripName = args ? args.substring(0, 30) : "";
       const result = startNewTrip(chatId, tripName);
+      const archivedLine = result.archivedTab
+        ? `📦 Old data archived: <code>${escapeHtml(result.archivedTab)}</code>\n`
+        : "";
       sendMessage(chatId,
         `🗂️ <b>New trip started!</b>\n\n` +
-        `📦 Old data archived: <code>${result.archivedTab}</code>\n` +
-        `✨ New tab: <code>${result.newTab}</code>\n\n` +
+        archivedLine +
+        `✨ New tab: <code>${escapeHtml(result.newTab)}</code>\n\n` +
         `All commands now record to the new tab. Old data is preserved.`,
         "HTML");
       return HtmlService.createHtmlOutput("ok");
@@ -448,11 +563,11 @@ function doPost(e) {
       }
       const rows = successes.map(p => {
         const paidByLabel = p.paidBy || senderName;
-        return `• <b>${p.note || p.type}</b> ${formatAmount(p.amount, currency)} — ${paidByLabel}`;
+        return `• <b>${escapeHtml(p.note || p.type)}</b> ${formatAmount(p.amount, currency)} — ${escapeHtml(paidByLabel)}`;
       });
       let reply = `✅ Recorded ${successes.length} transaction${successes.length > 1 ? "s" : ""}:\n` + rows.join("\n");
       if (failures.length > 0) {
-        reply += `\n\n⚠️ Couldn't parse:\n` + failures.map(f => `• ${f}`).join("\n");
+        reply += `\n\n⚠️ Couldn't parse:\n` + failures.map(f => `• ${escapeHtml(f)}`).join("\n");
       }
       sendChunked(chatId, reply, "HTML");
       return HtmlService.createHtmlOutput("ok");
@@ -472,9 +587,9 @@ function doPost(e) {
     appendToSheet(parsed, senderName, chatId);
     const paidByLabel = parsed.paidBy || senderName;
     const reply =
-      `✅ Recorded: <b>${parsed.type}</b> ${formatAmount(parsed.amount, currency)} — ${parsed.note || ""}\n` +
-      `🏷️ Category: <b>${parsed.category || "Other"}</b>\n` +
-      `👤 Paid by: <b>${paidByLabel}</b>\n\n${parsed.reaction}`;
+      `✅ Recorded: <b>${escapeHtml(parsed.type)}</b> ${formatAmount(parsed.amount, currency)} — ${escapeHtml(parsed.note || "")}\n` +
+      `🏷️ Category: <b>${escapeHtml(parsed.category || "Other")}</b>\n` +
+      `👤 Paid by: <b>${escapeHtml(paidByLabel)}</b>\n\n${escapeHtml(parsed.reaction || "")}`;
     sendMessage(chatId, reply, "HTML");
     return HtmlService.createHtmlOutput("ok");
 
@@ -492,9 +607,11 @@ function doPost(e) {
 function parseAndReactWithGemini(text, userName, currency, members) {
   try {
     const memberList = members.join(", ");
-    const amountRules = currency.shorthands
-      ? `- "10k" means 10,000, "1.5k" means 1,500, "10m" means 10,000,000\n- Currency is ${currency.name} (${currency.code}). Return amount as a plain integer.`
-      : `- Currency is ${currency.name} (${currency.code}). Return amount as a number with up to ${currency.decimals} decimal places (e.g. 5.50).`;
+    const decimalRule = currency.decimals === 0
+      ? `Currency is ${currency.name} (${currency.code}). Return amount as a plain integer.`
+      : `Currency is ${currency.name} (${currency.code}). Return amount as a number with up to ${currency.decimals} decimal places (e.g. 5.50).`;
+    const amountRules =
+      `- "10k" means 10,000, "1.5k" means 1,500, "10m" means 10,000,000 (any currency)\n- ${decimalRule}`;
 
     const prompt = `
 You are a friendly group expense assistant.
@@ -655,16 +772,17 @@ function getFinanceReport(mode = "all", chatId) {
   const data = sh.getDataRange().getValues();
   if (data.length <= 1) return "📭 No transactions recorded yet.";
 
-  const today = new Date();
-  const d = today.getDate(), m = today.getMonth(), y = today.getFullYear();
+  const tz = getTimezone(chatId);
+  const todayDate = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+  const thisMonth = todayDate.substring(0, 7);
   let income = 0, expense = 0;
 
   for (let i = 1; i < data.length; i++) {
     const [ts, , type, amt] = data[i];
     if (!ts || !type || !amt) continue;
-    const date = new Date(ts);
-    if (mode === "day" && (date.getDate() !== d || date.getMonth() !== m || date.getFullYear() !== y)) continue;
-    if (mode === "month" && (date.getMonth() !== m || date.getFullYear() !== y)) continue;
+    const rowDate = Utilities.formatDate(new Date(ts), tz, "yyyy-MM-dd");
+    if (mode === "day"   && rowDate !== todayDate) continue;
+    if (mode === "month" && rowDate.substring(0, 7) !== thisMonth) continue;
     if (type.toLowerCase() === "income")  income  += Number(amt);
     if (type.toLowerCase() === "expense") expense += Number(amt);
   }
@@ -701,7 +819,7 @@ function getCategoryReport(chatId) {
   entries.sort((a, b) => b[1] - a[1]);
 
   let result = "🏷️ <b>Expense by Category</b>\n\n";
-  entries.forEach(([cat, val]) => result += `• ${cat}: ${formatAmount(val, currency)}\n`);
+  entries.forEach(([cat, val]) => result += `• ${escapeHtml(cat)}: ${formatAmount(val, currency)}\n`);
   return result;
 }
 
@@ -712,15 +830,16 @@ function getTopCategoryReport(chatId) {
   const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No expense data yet.";
 
-  const today = new Date();
-  const m = today.getMonth(), y = today.getFullYear();
+  const tz = getTimezone(chatId);
+  const thisMonth = Utilities.formatDate(new Date(), tz, "yyyy-MM");
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
   const totals = {};
 
   data.forEach(row => {
     const [ts, , type, amt, , category] = row;
-    const date = new Date(ts);
-    if (type.toLowerCase() === "expense" && date.getMonth() === m && date.getFullYear() === y) {
+    if (!ts) return;
+    const rowMonth = Utilities.formatDate(new Date(ts), tz, "yyyy-MM");
+    if (type.toLowerCase() === "expense" && rowMonth === thisMonth) {
       totals[category] = (totals[category] || 0) + Number(amt || 0);
     }
   });
@@ -734,7 +853,7 @@ function getTopCategoryReport(chatId) {
   const percent = ((topVal / total) * 100).toFixed(1);
 
   return `📈 <b>Top Spending Category This Month</b>\n\n` +
-    `🥇 <b>${topCat}</b>: ${formatAmount(topVal, currency)}\n` +
+    `🥇 <b>${escapeHtml(topCat)}</b>: ${formatAmount(topVal, currency)}\n` +
     `About ${percent}% of total expenses.\n\nKeep up the good financial habits 💪`;
 }
 
@@ -779,7 +898,7 @@ function getTripSummary(chatId) {
     const diffLabel = diff >= 0
       ? `<i>(+${formatAmount(diff, currency)} over)</i>`
       : `<i>(-${formatAmount(Math.abs(diff), currency)} under)</i>`;
-    result += `• ${name}: ${formatAmount(amt, currency)} ${diffLabel}\n`;
+    result += `• ${escapeHtml(name)}: ${formatAmount(amt, currency)} ${diffLabel}\n`;
   });
 
   result += `\nUse /settle to see who pays whom.`;
@@ -796,16 +915,15 @@ function getTodayByPerson(chatId) {
   const sh = ss.getSheetByName(tabName);
   if (!sh || sh.getLastRow() <= 1) return "📭 No transactions yet.";
 
-  const today = new Date();
-  const d = today.getDate(), m = today.getMonth(), y = today.getFullYear();
+  const tz = getTimezone(chatId);
+  const todayDate = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
   const byPerson = {};
 
   data.forEach(row => {
     const [ts, user, type, amt, note, , paidBy] = row;
     if (!ts || type.toLowerCase() !== "expense") return;
-    const date = new Date(ts);
-    if (date.getDate() !== d || date.getMonth() !== m || date.getFullYear() !== y) return;
+    if (Utilities.formatDate(new Date(ts), tz, "yyyy-MM-dd") !== todayDate) return;
     const name = paidBy || user || "Unknown";
     if (!byPerson[name]) byPerson[name] = [];
     byPerson[name].push({ note, amt: Number(amt || 0) });
@@ -816,8 +934,8 @@ function getTodayByPerson(chatId) {
   let result = `📅 <b>Today's Expenses by Person</b>\n\n`;
   Object.entries(byPerson).sort((a, b) => a[0].localeCompare(b[0])).forEach(([name, items]) => {
     const total = items.reduce((s, i) => s + i.amt, 0);
-    result += `👤 <b>${name}</b> — ${formatAmount(total, currency)}\n`;
-    items.forEach(i => result += `  • ${i.note}: ${formatAmount(i.amt, currency)}\n`);
+    result += `👤 <b>${escapeHtml(name)}</b> — ${formatAmount(total, currency)}\n`;
+    items.forEach(i => result += `  • ${escapeHtml(i.note)}: ${formatAmount(i.amt, currency)}\n`);
     result += `\n`;
   });
   return result;
@@ -849,13 +967,15 @@ function getPersonTransactions(name, chatId) {
     total += Number(amt || 0);
   });
 
-  if (rows.length === 0) return `📭 No expenses found for <b>${name}</b>.`;
+  const safeName = escapeHtml(name);
+  if (rows.length === 0) return `📭 No expenses found for <b>${safeName}</b>.`;
 
+  const tz = getTimezone(chatId);
   rows.sort((a, b) => a.ts - b.ts);
-  let result = `👤 <b>Transactions by ${name}</b>\n\n`;
+  let result = `👤 <b>Transactions by ${safeName}</b>\n\n`;
   rows.forEach(r => {
-    const dateStr = `${r.ts.getMonth() + 1}/${r.ts.getDate()}`;
-    result += `• [${dateStr}] ${r.note} — ${formatAmount(r.amt, currency)} (${r.category})\n`;
+    const d = Utilities.formatDate(r.ts, tz, "M/d");
+    result += `• [${d}] ${escapeHtml(r.note)} — ${formatAmount(r.amt, currency)} (${escapeHtml(r.category)})\n`;
   });
   result += `\n💰 <b>Total paid:</b> ${formatAmount(total, currency)}`;
   return result;
@@ -915,7 +1035,7 @@ function getSettlement(chatId) {
 
   result += `<b>What each person paid:</b>\n`;
   allMembers.sort().forEach(p => {
-    result += `• ${p}: ${formatAmount(paid[p] || 0, currency)}\n`;
+    result += `• ${escapeHtml(p)}: ${formatAmount(paid[p] || 0, currency)}\n`;
   });
 
   result += `\n<b>Transfers needed:</b>\n`;
@@ -923,7 +1043,7 @@ function getSettlement(chatId) {
     result += `✅ Everyone's even — nothing to settle!`;
   } else {
     settlements.forEach(s => {
-      result += `• ${s.from} → ${s.to}: ${formatAmount(s.amount, currency)}\n`;
+      result += `• ${escapeHtml(s.from)} → ${escapeHtml(s.to)}: ${formatAmount(s.amount, currency)}\n`;
     });
   }
   return result;
@@ -962,7 +1082,7 @@ function handleReceiptPhoto(msg, chatId) {
 
   const memberList = members.join(", ");
   const captionHint = caption ? `\nCaption from user: "${caption}"` : "";
-  const amountRules = currency.shorthands
+  const amountRules = currency.decimals === 0
     ? `Currency: ${currency.name} (${currency.code}). Return amount as a plain integer.`
     : `Currency: ${currency.name} (${currency.code}). Amount with up to ${currency.decimals} decimal places.`;
 
@@ -1014,13 +1134,13 @@ Return ONLY a raw JSON object (no markdown fences, no explanation):
   const paidByLabel = parsed.paidBy || senderName;
   let reply =
     `🧾 <b>Receipt scanned!</b>\n` +
-    `✅ <b>${parsed.note || "Receipt"}</b> ${formatAmount(parsed.amount, currency)}\n` +
-    `🏷️ Category: <b>${parsed.category || "Other"}</b>\n` +
-    `👤 Paid by: <b>${paidByLabel}</b>`;
+    `✅ <b>${escapeHtml(parsed.note || "Receipt")}</b> ${formatAmount(parsed.amount, currency)}\n` +
+    `🏷️ Category: <b>${escapeHtml(parsed.category || "Other")}</b>\n` +
+    `👤 Paid by: <b>${escapeHtml(paidByLabel)}</b>`;
   if (Array.isArray(parsed.items) && parsed.items.length > 0) {
-    reply += `\n\n<b>Items:</b>\n` + parsed.items.map(i => `• ${i}`).join("\n");
+    reply += `\n\n<b>Items:</b>\n` + parsed.items.map(i => `• ${escapeHtml(i)}`).join("\n");
   }
-  if (parsed.reaction) reply += `\n\n${parsed.reaction}`;
+  if (parsed.reaction) reply += `\n\n${escapeHtml(parsed.reaction)}`;
   sendChunked(chatId, reply, "HTML");
 }
 
@@ -1040,16 +1160,17 @@ function listTransactions(chatId, n) {
   const numRows = lastRow - startRow + 1;
   const data = sh.getRange(startRow, 1, numRows, sh.getLastColumn()).getValues();
 
+  const tz = getTimezone(chatId);
   let result = `📋 <b>Last ${numRows} transaction${numRows !== 1 ? "s" : ""}</b>\n`;
-  result += `<i>Use /delete &lt;id&gt; to remove one.</i>\n\n`;
+  result += `<i>Use /delete &lt;id&gt; or /edit &lt;id&gt; &lt;field&gt; &lt;value&gt; to modify.</i>\n\n`;
 
   // Show most-recent first
   for (let i = data.length - 1; i >= 0; i--) {
     const rowNum = startRow + i;
     const [ts, , type, amt, note, , paidBy] = data[i];
-    const date = ts ? `${new Date(ts).getMonth() + 1}/${new Date(ts).getDate()}` : "?";
+    const date = ts ? Utilities.formatDate(new Date(ts), tz, "M/d") : "?";
     const emoji = type?.toLowerCase() === "income" ? "💰" : "💸";
-    result += `<code>#${rowNum}</code> ${emoji} [${date}] <b>${note || "?"}</b> ${formatAmount(Number(amt || 0), currency)} — ${paidBy || "?"}\n`;
+    result += `<code>#${rowNum}</code> ${emoji} [${date}] <b>${escapeHtml(note || "?")}</b> ${formatAmount(Number(amt || 0), currency)} — ${escapeHtml(paidBy || "?")}\n`;
   }
   return result;
 }
@@ -1093,16 +1214,21 @@ function startNewTrip(chatId, tripName) {
     oldSheet.setName(archivedTab);
   }
 
+  // Sheets tab names can't contain : \ / ? * [ ] — strip them so a trip name
+  // like "Korea: Spring" doesn't make insertSheet throw.
+  const cleanName = tripName ? tripName.replace(/[:\\/?*\[\]]/g, " ").replace(/\s+/g, " ").trim() : "";
+
   // Determine new tab name; avoid collision
-  let newTab = tripName ? tripName : `Trip_${date}`;
+  const base = cleanName || `Trip_${date}`;
+  let newTab = base;
   let cnt = 1;
-  while (ss.getSheetByName(newTab)) newTab = `${tripName || "Trip_" + date}_${cnt++}`;
+  while (ss.getSheetByName(newTab)) newTab = `${base}_${cnt++}`;
 
   // Update the cached tab name and clear stale undo pointer
   props.setProperty(`SHEET_TAB_${chatId}`, newTab);
   props.deleteProperty(`LAST_UNDO_ROW_${chatId}`);
   ensureSheet(chatId); // creates fresh tab with headers
-  return { archivedTab, newTab };
+  return { archivedTab: oldSheet ? archivedTab : null, newTab };
 }
 
 // =====================================================
@@ -1122,14 +1248,202 @@ function setRemindersEnabled(chatId, enabled) {
 }
 
 // =====================================================
+// TIMEZONE HELPERS — per-chat IANA timezone
+// =====================================================
+
+// Returns the chat's configured timezone, or the Apps Script project default.
+function getTimezone(chatId) {
+  return PropertiesService.getScriptProperties().getProperty(`TIMEZONE_${chatId}`)
+    || DEFAULT_TIMEZONE
+    || Session.getScriptTimeZone();
+}
+
+// Validates an IANA timezone ID. Apps Script's Utilities.formatDate does NOT
+// throw for unknown IDs — Java's TimeZone.getTimeZone silently returns GMT —
+// so we detect that fallback: an unrecognized zone reports a +0000 offset at
+// every date, while any real non-UTC zone differs at least once across the
+// year (this also tolerates DST-only-GMT zones like Europe/London).
+function isValidTimezone(tz) {
+  // Allow IANA IDs (Region/City, optionally 3-part) plus digits, +, - in the
+  // city part for zones like Etc/GMT+5 and America/Port-au-Prince.
+  if (!tz || !/^(UTC|GMT|[A-Za-z]+\/[A-Za-z0-9+_-]+(\/[A-Za-z0-9+_-]+)?)$/.test(tz)) return false;
+  if (tz === "UTC" || tz === "GMT") return true;
+  try {
+    const jan = Utilities.formatDate(new Date(Date.UTC(2025, 0, 1, 12)), tz, "Z");
+    const jul = Utilities.formatDate(new Date(Date.UTC(2025, 6, 1, 12)), tz, "Z");
+    return jan !== "+0000" || jul !== "+0000";
+  } catch (e) {
+    return false;
+  }
+}
+
+// Stores a timezone after validating it. Returns false for unknown IDs.
+function setTimezone(chatId, tz) {
+  if (!isValidTimezone(tz)) return false;
+  PropertiesService.getScriptProperties().setProperty(`TIMEZONE_${chatId}`, tz);
+  return true;
+}
+
+// =====================================================
+// EDIT TRANSACTION — update one field of an existing row
+// Columns: 1=Timestamp 2=User 3=Type 4=Amount 5=Note 6=Category 7=PaidBy
+// =====================================================
+function editTransaction(chatId, rowNum, field, value, currency) {
+  const tabName = getSheetTabName(chatId);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(tabName);
+  if (!sh || rowNum <= 1 || rowNum > sh.getLastRow()) return { error: "notfound" };
+
+  const VALID_CATEGORIES = ["Food", "Transport", "Accommodation", "Activities", "Shopping", "Other"];
+  let col, newValue, display;
+
+  switch (field) {
+    case "note":
+    case "description":
+      col = 5; newValue = value; display = value; break;
+    case "amount": {
+      const num = parseAmountInput(value);
+      if (!num || isNaN(num) || num <= 0) return { error: "badamount" };
+      col = 4; newValue = num; display = formatAmount(num, currency); break;
+    }
+    case "payer":
+    case "paidby":
+      col = 7; newValue = toTitleCase(value); display = newValue; break;
+    case "category": {
+      const cat = toTitleCase(value.split(/\s+/)[0]);
+      if (!VALID_CATEGORIES.includes(cat)) return { error: "badcategory" };
+      col = 6; newValue = cat; display = cat; break;
+    }
+    default:
+      return { error: "badfield" };
+  }
+
+  try {
+    sh.getRange(rowNum, col).setValue(newValue);
+    return { display };
+  } catch (err) {
+    Logger.log("editTransaction error: " + err);
+    return { error: "notfound" };
+  }
+}
+
+// =====================================================
+// SEARCH — find transactions by keyword across note/category/payer
+// =====================================================
+function searchTransactions(chatId, keyword) {
+  const tabName = getSheetTabName(chatId);
+  const currency = getCurrency(chatId);
+  const tz = getTimezone(chatId);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(tabName);
+  if (!sh || sh.getLastRow() <= 1) return "📭 No transactions recorded yet.";
+
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  const q = keyword.toLowerCase();
+  const matches = [];
+
+  data.forEach((row, idx) => {
+    const [ts, , type, amt, note, category, paidBy] = row;
+    if (!ts) return;
+    if ([note, category, paidBy].join(" ").toLowerCase().includes(q)) {
+      matches.push({ rowNum: idx + 2, ts: new Date(ts), type, amt: Number(amt || 0), note, category, paidBy });
+    }
+  });
+
+  const safeKeyword = escapeHtml(keyword);
+  if (matches.length === 0) return `📭 No transactions found for "<b>${safeKeyword}</b>".`;
+
+  const expenseTotal = matches
+    .filter(m => m.type?.toLowerCase() === "expense")
+    .reduce((s, m) => s + m.amt, 0);
+
+  // Show most recent 20
+  const shown = matches.slice(-20).reverse();
+  let result = `🔍 <b>Results for "${safeKeyword}"</b> (${matches.length} found)\n\n`;
+  shown.forEach(m => {
+    const d = Utilities.formatDate(m.ts, tz, "M/d");
+    const emoji = m.type?.toLowerCase() === "income" ? "💰" : "💸";
+    result += `<code>#${m.rowNum}</code> ${emoji} [${d}] <b>${escapeHtml(m.note || "?")}</b> ${formatAmount(m.amt, currency)} — ${escapeHtml(m.paidBy || "?")}\n`;
+  });
+  if (matches.length > 20) result += `<i>…and ${matches.length - 20} earlier result${matches.length - 20 > 1 ? "s" : ""}</i>\n`;
+  result += `\n💰 <b>Total expenses:</b> ${formatAmount(expenseTotal, currency)}`;
+  return result;
+}
+
+// =====================================================
 // HELPER — convert a string to Title Case
 // =====================================================
 function toTitleCase(str) {
   return str.replace(/\w\S*/g, txt => txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase());
 }
 
+// Escapes the characters Telegram's HTML parse mode treats as markup.
+// Free-text fields (notes, payer names) MUST pass through this before being
+// embedded in an HTML message, or "fish & chips" produces a 400 and the
+// message silently fails (sendMessage uses muteHttpExceptions).
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Parses a user-typed amount, honoring k/m shorthand ("10k" = 10,000),
+// which applies to every currency. Returns NaN for invalid input.
+function parseAmountInput(value) {
+  const s = String(value).trim().toLowerCase().replace(/,/g, "");
+  const m = s.match(/^([0-9]*\.?[0-9]+)\s*([km])?$/);
+  if (!m) return NaN;
+  const num = parseFloat(m[1]);
+  if (!m[2]) return num;
+  return num * (m[2] === "k" ? 1000 : 1000000);
+}
+
 // =====================================================
-// TELEGRAM HANDLER
+// ONBOARDING — sent on /start and when bot is added to a group
+// =====================================================
+function sendWelcome(chatId, adderName) {
+  const props = PropertiesService.getScriptProperties();
+  const currency = getCurrency(chatId);
+  const members = getMembers(chatId);
+  const tz = getTimezone(chatId);
+
+  const tzSet     = props.getProperty(`TIMEZONE_${chatId}`) !== null;
+  const curSet    = props.getProperty(`CURRENCY_${chatId}`) !== null;
+  const membersSet = hasCustomMembers(chatId);
+
+  const safeTz = escapeHtml(tz);
+  const safeMembers = escapeHtml(members.join(", "));
+
+  const tzLine      = tzSet      ? `✅ Timezone: <code>${safeTz}</code>` : `⚙️ Timezone: <code>${safeTz}</code> <i>(default)</i>\n   → <code>/settimezone Asia/Seoul</code>`;
+  const curLine     = curSet     ? `✅ Currency: ${currency.code} (${currency.symbol})` : `⚙️ Currency: ${currency.code} (${currency.symbol}) <i>(default)</i>\n   → <code>/setcurrency KRW</code>`;
+  const membersLine = membersSet ? `✅ Members: ${safeMembers}` : `⚙️ Members: ${safeMembers} <i>(default)</i>\n   → <code>/setmembers Sayuri Chloe</code>`;
+
+  const allDone = tzSet && curSet && membersSet;
+  const greeting = adderName ? `Thanks for adding me, <b>${escapeHtml(adderName)}</b>! ` : "";
+
+  const msg =
+    `👋 ${greeting}I'm <b>Gemini Finance Bot</b> 💰\n` +
+    `I track group trip expenses and calculate who owes whom.\n\n` +
+    `<b>── Setup checklist ──</b>\n\n` +
+    `${tzLine}\n\n` +
+    `${curLine}\n\n` +
+    `${membersLine}\n\n` +
+    (allDone
+      ? `✨ <b>You're all set!</b>\n\n`
+      : `Run the commands above to complete setup.\n\n`) +
+    `<b>── Then just send expenses ──</b>\n\n` +
+    `<code>coffee 10k sayuri</code>\n` +
+    `<code>lunch 25000 - chloe</code>\n` +
+    `<code>hotel 150000</code> <i>(payer = you)</i>\n` +
+    `📷 Or send a <b>receipt photo</b> to scan it!\n\n` +
+    `Use /help to see all commands.`;
+
+  sendMessage(chatId, msg, "HTML");
+}
+
+// =====================================================
+// TELEGRAM HANDLERS
 // =====================================================
 function sendMessage(chatId, text, mode = "HTML", buttons = null) {
   const payload = { chat_id: chatId, text, parse_mode: mode };
@@ -1138,6 +1452,15 @@ function sendMessage(chatId, text, mode = "HTML", buttons = null) {
     method: "post",
     contentType: "application/json",
     payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+}
+
+function answerCallbackQuery(callbackQueryId) {
+  UrlFetchApp.fetch(`${TG_API}/answerCallbackQuery`, {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify({ callback_query_id: callbackQueryId }),
     muteHttpExceptions: true,
   });
 }
