@@ -216,43 +216,43 @@ function doPost(e) {
       ensureSheet(chatId);
       const supported = Object.keys(CURRENCIES).join(", ");
       const helpText =
-        "👋 Hello *" + (msg.from.first_name || "there") + "!*\n\n" +
-        "I'm *Gemini Finance Bot* 💰 – your expense tracker.\n\n" +
+        "👋 Hello <b>" + escapeHtml(msg.from.first_name || "there") + "!</b>\n\n" +
+        "I'm <b>Gemini Finance Bot</b> 💰 – your expense tracker.\n\n" +
         "🧾 Log expenses naturally:\n" +
-        "• `lunch 10k sayuri` (k = ×1,000, any currency)\n" +
-        "• `coffee 5.50 - chloe` (decimals where supported)\n" +
+        "• <code>lunch 10k sayuri</code> (k = ×1,000, any currency)\n" +
+        "• <code>coffee 5.50 - chloe</code> (decimals where supported)\n" +
         "• Multi-line: send several transactions at once\n" +
         "• 📷 Send a receipt photo to scan it automatically!\n\n" +
         "📊 Report commands:\n" +
-        "• `/report` – Overall report\n" +
-        "• `/reportday` – Today's report\n" +
-        "• `/reportmonth` – Monthly report\n" +
-        "• `/reportcategory` – Report by category\n" +
-        "• `/topcategory` – Top spending category\n\n" +
+        "• <code>/report</code> – Overall report\n" +
+        "• <code>/reportday</code> – Today's report\n" +
+        "• <code>/reportmonth</code> – Monthly report\n" +
+        "• <code>/reportcategory</code> – Report by category\n" +
+        "• <code>/topcategory</code> – Top spending category\n\n" +
         "✈️ Trip commands:\n" +
-        "• `/trip` – Full trip summary per person\n" +
-        "• `/today` – Today's expenses by person\n" +
-        "• `/person <name>` – All transactions by a person\n" +
-        "• `/settle` – Settlement: who pays whom\n\n" +
+        "• <code>/trip</code> – Full trip summary per person\n" +
+        "• <code>/today</code> – Today's expenses by person\n" +
+        "• <code>/person &lt;name&gt;</code> – All transactions by a person\n" +
+        "• <code>/settle</code> – Settlement: who pays whom\n\n" +
         "📋 History:\n" +
-        "• `/list` – Last 10 transactions with IDs\n" +
-        "• `/list 20` – Last 20 transactions\n" +
-        "• `/delete <id>` – Delete transaction by ID\n" +
-        "• `/edit <id> <field> <value>` – Edit a transaction\n" +
-        "• `/search <keyword>` – Search transactions\n\n" +
+        "• <code>/list</code> – Last 10 transactions with IDs\n" +
+        "• <code>/list 20</code> – Last 20 transactions\n" +
+        "• <code>/delete &lt;id&gt;</code> – Delete transaction by ID\n" +
+        "• <code>/edit &lt;id&gt; &lt;field&gt; &lt;value&gt;</code> – Edit a transaction\n" +
+        "• <code>/search &lt;keyword&gt;</code> – Search transactions\n\n" +
         "🗂️ Trip lifecycle:\n" +
-        "• `/newtrip [name]` – Archive current trip, start fresh\n\n" +
-        "🛠️ Settings & other:\n" +
-        "• `/setmembers <names>` – Set trip members for this chat\n" +
-        "• `/setcurrency <code>` – Set currency (" + supported + ")\n" +
-        "• `/settimezone <tz>` – Set timezone (e.g. Asia/Seoul)\n" +
-        "• `/reminders on/off` – Toggle daily reminders\n" +
-        "• `/undo` – Undo last transaction\n" +
-        "• `/confirm` – Confirm deletion\n" +
-        "• `/whoami` – Chat ID, currency, tab, timezone & members\n\n" +
+        "• <code>/newtrip [name]</code> – Archive current trip, start fresh\n\n" +
+        "🛠️ Settings &amp; other:\n" +
+        "• <code>/setmembers &lt;names&gt;</code> – Set trip members for this chat\n" +
+        "• <code>/setcurrency &lt;code&gt;</code> – Set currency (" + escapeHtml(supported) + ")\n" +
+        "• <code>/settimezone &lt;tz&gt;</code> – Set timezone (e.g. Asia/Seoul)\n" +
+        "• <code>/reminders on/off</code> – Toggle daily reminders\n" +
+        "• <code>/undo</code> – Undo last transaction\n" +
+        "• <code>/confirm</code> – Confirm deletion\n" +
+        "• <code>/whoami</code> – Chat ID, currency, tab, timezone &amp; members\n\n" +
         "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.\n\n" +
-        "💱 Current currency: *" + currency.code + "* (" + currency.symbol + ")";
-      sendMessage(chatId, helpText, "Markdown");
+        "💱 Current currency: <b>" + currency.code + "</b> (" + currency.symbol + ")";
+      sendMessage(chatId, helpText, "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
