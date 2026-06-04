@@ -119,31 +119,86 @@ function sendChunked(chatId, text, mode = "HTML") {
 // SHEET TAB ROUTING — one tab per chat
 // =====================================================
 
+function sanitizeTabName(name) {
+  return name.replace(/[:\\/?*\[\]]/g, " ").replace(/\s+/g, " ").trim().substring(0, 100);
+}
+
+// Fetches the chat title from Telegram (group name, or first+last name for DMs).
+function getChatTitle(chatId) {
+  try {
+    const res = UrlFetchApp.fetch(
+      `https://api.telegram.org/bot${BOT_TOKEN}/getChat?chat_id=${chatId}`,
+      { muteHttpExceptions: true }
+    );
+    const data = JSON.parse(res.getContentText());
+    if (data.ok) {
+      const c = data.result;
+      return c.title || [c.first_name, c.last_name].filter(Boolean).join(" ") || null;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// Derives a unique, valid tab name from a chat title. Falls back to the raw
+// chatId when the title is missing or sanitizes to empty, and appends the
+// chatId when another chat already uses the same name.
+function computeTabName(title, chatId, usedNames) {
+  const sanitized = title ? sanitizeTabName(title) : "";
+  if (!sanitized) return String(chatId);
+  return usedNames.has(sanitized)
+    ? sanitized.substring(0, 90) + ` (${chatId})`
+    : sanitized;
+}
+
 // Returns the sheet tab name for this chatId.
-// The first chatId to call this claims the legacy "Transactions" tab so existing
-// data isn't lost. Every new chatId after that gets its own tab named by chatId.
-// LockService prevents two concurrent webhooks from both claiming "Transactions".
+// Tab names are derived from the Telegram chat title so tabs are human-readable.
+// The first chatId claims the legacy "Transactions" tab to preserve existing data.
+// All mutations run inside a LockService lock so concurrent webhooks for the
+// same chat can't both claim "Transactions" or both rename a numeric tab.
 function getSheetTabName(chatId) {
   const props = PropertiesService.getScriptProperties();
   const key = `SHEET_TAB_${chatId}`;
   const cached = props.getProperty(key);
-  if (cached) return cached;
+  // Fast path: a non-numeric (already-upgraded) name needs no further work.
+  if (cached && !/^-?\d+$/.test(cached)) return cached;
 
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(10000);
-    // Re-check inside the lock — another invocation may have set it while we waited
-    const recheck = props.getProperty(key);
-    if (recheck) return recheck;
+    // Re-read inside the lock — another invocation may have changed it.
+    const current = props.getProperty(key);
+    const allProps = props.getProperties();
+    const usedNames = new Set(
+      Object.entries(allProps)
+        .filter(([k]) => k.startsWith("SHEET_TAB_") && k !== key)
+        .map(([, v]) => v)
+    );
 
+    // Auto-upgrade an old numeric tab name (raw chatId) to the chat title.
+    if (current && /^-?\d+$/.test(current)) {
+      const title = getChatTitle(chatId);
+      if (!title) return current; // keep numeric name; retry on a later message
+      const newName = computeTabName(title, chatId, usedNames);
+      if (newName === current) return current;
+      try {
+        const ss = SpreadsheetApp.openById(SHEET_ID);
+        const sh = ss.getSheetByName(current);
+        if (sh) sh.setName(newName);
+        props.setProperty(key, newName);
+        return newName;
+      } catch (e) {
+        return current;
+      }
+    }
+    if (current) return current;
+
+    // First time we've seen this chat: claim the legacy tab or create a new one.
     const ss = SpreadsheetApp.openById(SHEET_ID);
     const transTab = ss.getSheetByName("Transactions");
-    // One round-trip instead of N+1 per-key reads
-    const allProps = props.getProperties();
-    const alreadyClaimed = Object.entries(allProps).some(
-      ([k, v]) => k.startsWith("SHEET_TAB_") && v === "Transactions"
-    );
-    const tabName = (transTab && !alreadyClaimed) ? "Transactions" : String(chatId);
+    const alreadyClaimed = usedNames.has("Transactions");
+    const tabName = (transTab && !alreadyClaimed)
+      ? "Transactions"
+      : computeTabName(getChatTitle(chatId), chatId, usedNames);
     props.setProperty(key, tabName);
     return tabName;
   } finally {
@@ -152,11 +207,61 @@ function getSheetTabName(chatId) {
 }
 
 // =====================================================
+// WEBHOOK SETUP — run once from the Apps Script editor after deploy.
+// Re-registers the webhook and opts into my_chat_member updates so the
+// bot fires the welcome message when added to a group.
+//
+// IMPORTANT: Telegram must call the published /exec web-app URL, not the
+// /dev (head) URL. ScriptApp.getService().getUrl() can return the /dev URL
+// depending on how the script is run, so pass the /exec URL explicitly:
+//   setup("https://script.google.com/macros/s/AKfy.../exec")
+// Run with no argument only if you've confirmed getUrl() returns /exec.
+// =====================================================
+function setup(webhookUrl) {
+  webhookUrl = webhookUrl || ScriptApp.getService().getUrl();
+  if (!webhookUrl || webhookUrl.indexOf("/exec") === -1) {
+    Logger.log("⚠️ Refusing to register a non-/exec URL: " + webhookUrl +
+      "\nPass the published /exec URL explicitly: setup('https://.../exec')");
+    return;
+  }
+  const res = UrlFetchApp.fetch(
+    `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`,
+    {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({
+        url: webhookUrl,
+        allowed_updates: ["message", "callback_query", "my_chat_member"],
+      }),
+    }
+  );
+  Logger.log("Registered webhook: " + webhookUrl + "\nsetWebhook response: " + res.getContentText());
+}
+
+// =====================================================
 // WEBHOOK ENTRY POINT
 // =====================================================
 function doPost(e) {
   try {
     const update = JSON.parse(e.postData.contents);
+
+    // Bot added to a chat — my_chat_member is the reliable signal for this in
+    // modern Telegram groups/supergroups. Only welcome on a genuine join
+    // transition (was absent → now present); ignore promotions/demotions and
+    // the bot leaving, so we don't re-send the guide on every status change.
+    if (update.my_chat_member) {
+      const mc = update.my_chat_member;
+      const oldStatus = mc.old_chat_member?.status;
+      const newStatus = mc.new_chat_member?.status;
+      const wasAbsent = !oldStatus || oldStatus === "left" || oldStatus === "kicked";
+      const nowPresent = newStatus === "member" || newStatus === "administrator";
+      if (wasAbsent && nowPresent) {
+        const chatId = mc.chat.id;
+        ensureSheet(chatId);
+        sendWelcome(chatId, mc.from?.first_name || "");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
 
     // Normalize callback_query (inline button tap) into a message-like object
     // so the rest of the routing handles it identically to a typed command.
@@ -175,16 +280,6 @@ function doPost(e) {
 
     const chatId = msg.chat.id;
     const text = msg.text?.trim() || "";
-
-    // Bot added to a group: send the setup guide automatically.
-    // The bot's own user ID is the numeric prefix of its token, so we welcome
-    // only when THIS bot joins — not when any other bot is added.
-    const botId = Number(BOT_TOKEN.split(":")[0]);
-    if (msg.new_chat_members?.some(u => u.id === botId)) {
-      ensureSheet(chatId);
-      sendWelcome(chatId, msg.from.first_name);
-      return HtmlService.createHtmlOutput("ok");
-    }
 
     // Receipt OCR: handle photo messages before the text guard
     if (msg.photo) {
@@ -278,9 +373,9 @@ function doPost(e) {
         const label = hasCustomMembers(chatId) ? "" : " <i>(default)</i>";
         sendMessage(chatId,
           `👥 <b>Current members:</b> ${escapeHtml(current.join(", "))}${label}\n\n` +
-          `Set new list:\n` +
-          `<code>/setmembers Sayuri Chloe Alex</code>\n` +
-          `<code>/setmembers Sayuri, Chloe, Alex</code>`,
+          `Set new list (use commas to separate names):\n` +
+          `<code>/setmembers Sayuri, Chloe</code>\n` +
+          `<code>/setmembers Sayuri, Kristel Chloe</code> <i>(multi-word name)</i>`,
           "HTML");
         return HtmlService.createHtmlOutput("ok");
       }
@@ -288,13 +383,17 @@ function doPost(e) {
       const rawNames = args.includes(',') ? args.split(',') : args.split(/\s+/);
       const names = rawNames.map(s => toTitleCase(s.trim())).filter(Boolean);
       if (setMembers(chatId, names)) {
+        const commaHint = !args.includes(',')
+          ? `\n\n💡 <i>Tip: If any name has multiple words (e.g. "Kristel Chloe"), use commas:\n<code>/setmembers ${escapeHtml(names.join(', '))}</code></i>`
+          : "";
         sendMessage(chatId,
           `✅ Members set to: <b>${escapeHtml(names.join(", "))}</b>\n\n` +
           `Future transactions will recognize these names. ` +
-          `Existing data is untouched — old payers still appear in /settle.`,
+          `Existing data is untouched — old payers still appear in /settle.` +
+          commaHint,
           "HTML");
       } else {
-        sendMessage(chatId, `⚠️ Please provide at least one name.\nExample: <code>/setmembers Sayuri Chloe Alex</code>`, "HTML");
+        sendMessage(chatId, `⚠️ Please provide at least one name.\nExample: <code>/setmembers Sayuri, Chloe</code>`, "HTML");
       }
       return HtmlService.createHtmlOutput("ok");
     }
@@ -1408,16 +1507,23 @@ function sendWelcome(chatId, adderName) {
   const members = getMembers(chatId);
   const tz = getTimezone(chatId);
 
-  const tzSet     = props.getProperty(`TIMEZONE_${chatId}`) !== null;
-  const curSet    = props.getProperty(`CURRENCY_${chatId}`) !== null;
+  const tzSet      = props.getProperty(`TIMEZONE_${chatId}`) !== null;
+  const curSet     = props.getProperty(`CURRENCY_${chatId}`) !== null;
   const membersSet = hasCustomMembers(chatId);
 
-  const safeTz = escapeHtml(tz);
+  const safeTz      = escapeHtml(tz);
   const safeMembers = escapeHtml(members.join(", "));
 
-  const tzLine      = tzSet      ? `✅ Timezone: <code>${safeTz}</code>` : `⚙️ Timezone: <code>${safeTz}</code> <i>(default)</i>\n   → <code>/settimezone Asia/Seoul</code>`;
-  const curLine     = curSet     ? `✅ Currency: ${currency.code} (${currency.symbol})` : `⚙️ Currency: ${currency.code} (${currency.symbol}) <i>(default)</i>\n   → <code>/setcurrency KRW</code>`;
-  const membersLine = membersSet ? `✅ Members: ${safeMembers}` : `⚙️ Members: ${safeMembers} <i>(default)</i>\n   → <code>/setmembers Sayuri Chloe</code>`;
+  let step = 1;
+  const tzLine = tzSet
+    ? `✅ Timezone: <code>${safeTz}</code>`
+    : `${step++}. Set your timezone:\n   <code>/settimezone Pacific/Auckland</code>\n   <i>(e.g. Asia/Seoul, Australia/Sydney)</i>`;
+  const curLine = curSet
+    ? `✅ Currency: ${currency.code} (${currency.symbol})`
+    : `${step++}. Set your currency:\n   <code>/setcurrency NZD</code>\n   <i>(supported: KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY)</i>`;
+  const membersLine = membersSet
+    ? `✅ Members: ${safeMembers}`
+    : `${step++}. Set trip members (use commas to separate):\n   <code>/setmembers Sayuri, Chloe</code>\n   <i>Multi-word names need commas: <code>/setmembers Sayuri, Kristel Chloe</code></i>`;
 
   const allDone = tzSet && curSet && membersSet;
   const greeting = adderName ? `Thanks for adding me, <b>${escapeHtml(adderName)}</b>! ` : "";
@@ -1425,17 +1531,17 @@ function sendWelcome(chatId, adderName) {
   const msg =
     `👋 ${greeting}I'm <b>Gemini Finance Bot</b> 💰\n` +
     `I track group trip expenses and calculate who owes whom.\n\n` +
-    `<b>── Setup checklist ──</b>\n\n` +
+    `<b>── Setup ──</b>\n\n` +
     `${tzLine}\n\n` +
     `${curLine}\n\n` +
     `${membersLine}\n\n` +
     (allDone
       ? `✨ <b>You're all set!</b>\n\n`
-      : `Run the commands above to complete setup.\n\n`) +
-    `<b>── Then just send expenses ──</b>\n\n` +
-    `<code>coffee 10k sayuri</code>\n` +
-    `<code>lunch 25000 - chloe</code>\n` +
-    `<code>hotel 150000</code> <i>(payer = you)</i>\n` +
+      : `Complete the steps above, then start tracking!\n\n`) +
+    `<b>── Sending expenses ──</b>\n\n` +
+    `<code>coffee 5 sayuri</code>\n` +
+    `<code>lunch 25 - Kristel Chloe</code>\n` +
+    `<code>hotel 150</code> <i>(payer = you)</i>\n` +
     `📷 Or send a <b>receipt photo</b> to scan it!\n\n` +
     `Use /help to see all commands.`;
 
