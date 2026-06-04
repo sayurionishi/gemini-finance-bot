@@ -139,74 +139,66 @@ function getChatTitle(chatId) {
   return null;
 }
 
+// Derives a unique, valid tab name from a chat title. Falls back to the raw
+// chatId when the title is missing or sanitizes to empty, and appends the
+// chatId when another chat already uses the same name.
+function computeTabName(title, chatId, usedNames) {
+  const sanitized = title ? sanitizeTabName(title) : "";
+  if (!sanitized) return String(chatId);
+  return usedNames.has(sanitized)
+    ? sanitized.substring(0, 90) + ` (${chatId})`
+    : sanitized;
+}
+
 // Returns the sheet tab name for this chatId.
 // Tab names are derived from the Telegram chat title so tabs are human-readable.
 // The first chatId claims the legacy "Transactions" tab to preserve existing data.
-// LockService prevents two concurrent webhooks from both claiming "Transactions".
+// All mutations run inside a LockService lock so concurrent webhooks for the
+// same chat can't both claim "Transactions" or both rename a numeric tab.
 function getSheetTabName(chatId) {
   const props = PropertiesService.getScriptProperties();
   const key = `SHEET_TAB_${chatId}`;
   const cached = props.getProperty(key);
-
-  // Auto-upgrade old numeric tab names (raw chatId) to the real chat title.
-  if (cached && /^-?\d+$/.test(cached)) {
-    const title = getChatTitle(chatId);
-    if (title) {
-      const sanitized = sanitizeTabName(title);
-      const allProps = props.getProperties();
-      const usedNames = new Set(
-        Object.entries(allProps)
-          .filter(([k]) => k.startsWith("SHEET_TAB_") && k !== key)
-          .map(([, v]) => v)
-      );
-      const newName = usedNames.has(sanitized)
-        ? sanitizeTabName(title).substring(0, 90) + ` (${chatId})`
-        : sanitized;
-      try {
-        const ss = SpreadsheetApp.openById(SHEET_ID);
-        const sh = ss.getSheetByName(cached);
-        if (sh) sh.setName(newName);
-        props.setProperty(key, newName);
-        return newName;
-      } catch (e) {}
-    }
-    return cached;
-  }
-  if (cached) return cached;
+  // Fast path: a non-numeric (already-upgraded) name needs no further work.
+  if (cached && !/^-?\d+$/.test(cached)) return cached;
 
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(10000);
-    // Re-check inside the lock — another invocation may have set it while we waited
-    const recheck = props.getProperty(key);
-    if (recheck) return recheck;
-
-    const ss = SpreadsheetApp.openById(SHEET_ID);
-    const transTab = ss.getSheetByName("Transactions");
+    // Re-read inside the lock — another invocation may have changed it.
+    const current = props.getProperty(key);
     const allProps = props.getProperties();
-    const alreadyClaimed = Object.entries(allProps).some(
-      ([k, v]) => k.startsWith("SHEET_TAB_") && v === "Transactions"
+    const usedNames = new Set(
+      Object.entries(allProps)
+        .filter(([k]) => k.startsWith("SHEET_TAB_") && k !== key)
+        .map(([, v]) => v)
     );
 
-    let tabName;
-    if (transTab && !alreadyClaimed) {
-      tabName = "Transactions";
-    } else {
+    // Auto-upgrade an old numeric tab name (raw chatId) to the chat title.
+    if (current && /^-?\d+$/.test(current)) {
       const title = getChatTitle(chatId);
-      if (title) {
-        const sanitized = sanitizeTabName(title);
-        const usedNames = new Set(
-          Object.entries(allProps)
-            .filter(([k]) => k.startsWith("SHEET_TAB_"))
-            .map(([, v]) => v)
-        );
-        tabName = usedNames.has(sanitized)
-          ? sanitized.substring(0, 90) + ` (${chatId})`
-          : sanitized;
-      } else {
-        tabName = String(chatId);
+      if (!title) return current; // keep numeric name; retry on a later message
+      const newName = computeTabName(title, chatId, usedNames);
+      if (newName === current) return current;
+      try {
+        const ss = SpreadsheetApp.openById(SHEET_ID);
+        const sh = ss.getSheetByName(current);
+        if (sh) sh.setName(newName);
+        props.setProperty(key, newName);
+        return newName;
+      } catch (e) {
+        return current;
       }
     }
+    if (current) return current;
+
+    // First time we've seen this chat: claim the legacy tab or create a new one.
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const transTab = ss.getSheetByName("Transactions");
+    const alreadyClaimed = usedNames.has("Transactions");
+    const tabName = (transTab && !alreadyClaimed)
+      ? "Transactions"
+      : computeTabName(getChatTitle(chatId), chatId, usedNames);
     props.setProperty(key, tabName);
     return tabName;
   } finally {
@@ -218,9 +210,20 @@ function getSheetTabName(chatId) {
 // WEBHOOK SETUP — run once from the Apps Script editor after deploy.
 // Re-registers the webhook and opts into my_chat_member updates so the
 // bot fires the welcome message when added to a group.
+//
+// IMPORTANT: Telegram must call the published /exec web-app URL, not the
+// /dev (head) URL. ScriptApp.getService().getUrl() can return the /dev URL
+// depending on how the script is run, so pass the /exec URL explicitly:
+//   setup("https://script.google.com/macros/s/AKfy.../exec")
+// Run with no argument only if you've confirmed getUrl() returns /exec.
 // =====================================================
-function setup() {
-  const webhookUrl = ScriptApp.getService().getUrl();
+function setup(webhookUrl) {
+  webhookUrl = webhookUrl || ScriptApp.getService().getUrl();
+  if (!webhookUrl || webhookUrl.indexOf("/exec") === -1) {
+    Logger.log("⚠️ Refusing to register a non-/exec URL: " + webhookUrl +
+      "\nPass the published /exec URL explicitly: setup('https://.../exec')");
+    return;
+  }
   const res = UrlFetchApp.fetch(
     `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`,
     {
@@ -232,7 +235,7 @@ function setup() {
       }),
     }
   );
-  Logger.log("setWebhook response: " + res.getContentText());
+  Logger.log("Registered webhook: " + webhookUrl + "\nsetWebhook response: " + res.getContentText());
 }
 
 // =====================================================
@@ -242,12 +245,17 @@ function doPost(e) {
   try {
     const update = JSON.parse(e.postData.contents);
 
-    // Bot added to (or removed from) a chat — my_chat_member is the reliable
-    // signal for this in modern Telegram groups/supergroups.
+    // Bot added to a chat — my_chat_member is the reliable signal for this in
+    // modern Telegram groups/supergroups. Only welcome on a genuine join
+    // transition (was absent → now present); ignore promotions/demotions and
+    // the bot leaving, so we don't re-send the guide on every status change.
     if (update.my_chat_member) {
       const mc = update.my_chat_member;
+      const oldStatus = mc.old_chat_member?.status;
       const newStatus = mc.new_chat_member?.status;
-      if (newStatus === "member" || newStatus === "administrator") {
+      const wasAbsent = !oldStatus || oldStatus === "left" || oldStatus === "kicked";
+      const nowPresent = newStatus === "member" || newStatus === "administrator";
+      if (wasAbsent && nowPresent) {
         const chatId = mc.chat.id;
         ensureSheet(chatId);
         sendWelcome(chatId, mc.from?.first_name || "");
@@ -272,16 +280,6 @@ function doPost(e) {
 
     const chatId = msg.chat.id;
     const text = msg.text?.trim() || "";
-
-    // Bot added to a group: send the setup guide automatically.
-    // The bot's own user ID is the numeric prefix of its token, so we welcome
-    // only when THIS bot joins — not when any other bot is added.
-    const botId = Number(BOT_TOKEN.split(":")[0]);
-    if (msg.new_chat_members?.some(u => u.id === botId)) {
-      ensureSheet(chatId);
-      sendWelcome(chatId, msg.from.first_name);
-      return HtmlService.createHtmlOutput("ok");
-    }
 
     // Receipt OCR: handle photo messages before the text guard
     if (msg.photo) {
@@ -386,7 +384,7 @@ function doPost(e) {
       const names = rawNames.map(s => toTitleCase(s.trim())).filter(Boolean);
       if (setMembers(chatId, names)) {
         const commaHint = !args.includes(',')
-          ? `\n\n💡 <i>Tip: If any name has multiple words (e.g. "Kristel Chloe"), use commas:\n<code>/setmembers ${names.join(', ')}</code></i>`
+          ? `\n\n💡 <i>Tip: If any name has multiple words (e.g. "Kristel Chloe"), use commas:\n<code>/setmembers ${escapeHtml(names.join(', '))}</code></i>`
           : "";
         sendMessage(chatId,
           `✅ Members set to: <b>${escapeHtml(names.join(", "))}</b>\n\n` +
