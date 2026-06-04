@@ -215,11 +215,45 @@ function getSheetTabName(chatId) {
 }
 
 // =====================================================
+// WEBHOOK SETUP — run once from the Apps Script editor after deploy.
+// Re-registers the webhook and opts into my_chat_member updates so the
+// bot fires the welcome message when added to a group.
+// =====================================================
+function setup() {
+  const webhookUrl = ScriptApp.getService().getUrl();
+  const res = UrlFetchApp.fetch(
+    `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`,
+    {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({
+        url: webhookUrl,
+        allowed_updates: ["message", "callback_query", "my_chat_member"],
+      }),
+    }
+  );
+  Logger.log("setWebhook response: " + res.getContentText());
+}
+
+// =====================================================
 // WEBHOOK ENTRY POINT
 // =====================================================
 function doPost(e) {
   try {
     const update = JSON.parse(e.postData.contents);
+
+    // Bot added to (or removed from) a chat — my_chat_member is the reliable
+    // signal for this in modern Telegram groups/supergroups.
+    if (update.my_chat_member) {
+      const mc = update.my_chat_member;
+      const newStatus = mc.new_chat_member?.status;
+      if (newStatus === "member" || newStatus === "administrator") {
+        const chatId = mc.chat.id;
+        ensureSheet(chatId);
+        sendWelcome(chatId, mc.from?.first_name || "");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
 
     // Normalize callback_query (inline button tap) into a message-like object
     // so the rest of the routing handles it identically to a typed command.
