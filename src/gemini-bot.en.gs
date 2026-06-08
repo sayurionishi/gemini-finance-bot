@@ -640,10 +640,10 @@ function doPost(e) {
     const members = getMembers(chatId);
     const isGroup = chatId < 0;
 
-    // Pre-filter: every transaction needs an amount, so skip Gemini entirely
-    // if the message has no digits. This avoids spamming group chats where
-    // people have normal conversations alongside expense tracking.
-    if (!/\d/.test(text)) return HtmlService.createHtmlOutput("no text");
+    // In group chats, skip Gemini entirely when the message has no digits —
+    // all transactions need an amount, so normal conversation never needs parsing.
+    // In DM chats we still attempt parsing so the user gets helpful feedback.
+    if (isGroup && !/\d/.test(text)) return HtmlService.createHtmlOutput("no text");
 
     const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
     if (lines.length > 1) {
