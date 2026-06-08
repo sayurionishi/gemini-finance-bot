@@ -614,11 +614,12 @@ function doPost(e) {
         sendMessage(chatId, "⚠️ No recent transaction found to delete.");
         return HtmlService.createHtmlOutput("ok");
       }
+      const tz = getTimezone(chatId);
       const confirmText =
         `❗ <b>Last transaction:</b>\n` +
-        `📅 ${last.date}\n💬 ${last.note}\n` +
+        `📅 ${Utilities.formatDate(new Date(last.date), tz, "EEE, d MMM yyyy HH:mm")}\n💬 ${escapeHtml(last.note)}\n` +
         `💸 ${last.type} ${formatAmount(last.amount, currency)} (${last.category || "Uncategorized"})\n` +
-        `👤 Paid by: ${last.paidBy || "Unknown"}\n\n` +
+        `👤 Paid by: ${escapeHtml(last.paidBy || "Unknown")}\n\n` +
         `Reply with <b>/confirm</b> to delete this transaction.`;
       sendMessage(chatId, confirmText, "HTML");
       return HtmlService.createHtmlOutput("ok");
