@@ -638,6 +638,12 @@ function doPost(e) {
     // =====================================================
     const senderName = msg.from.first_name || "User";
     const members = getMembers(chatId);
+    const isGroup = chatId < 0;
+
+    // In group chats, skip Gemini entirely when the message has no digits —
+    // all transactions need an amount, so normal conversation never needs parsing.
+    // In DM chats we still attempt parsing so the user gets helpful feedback.
+    if (isGroup && !/\d/.test(text)) return HtmlService.createHtmlOutput("no text");
 
     const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
     if (lines.length > 1) {
@@ -655,9 +661,11 @@ function doPost(e) {
         }
       }
       if (successes.length === 0) {
-        sendMessage(chatId,
-          "🤔 I couldn't understand any of those lines. Could you rephrase?\n\n" +
-          "Example:\n<code>coffee 10k sayuri\nbread 2k chloe</code>", "HTML");
+        if (!isGroup) {
+          sendMessage(chatId,
+            "🤔 I couldn't understand any of those lines. Could you rephrase?\n\n" +
+            "Example:\n<code>coffee 10k sayuri\nbread 2k chloe</code>", "HTML");
+        }
         return HtmlService.createHtmlOutput("unclear");
       }
       const rows = successes.map(p => {
@@ -677,9 +685,11 @@ function doPost(e) {
     // Gemini sometimes returns amounts as strings — coerce early so formatAmount works correctly
     if (parsed?.amount != null) parsed.amount = Number(parsed.amount);
     if (!parsed?.amount || !parsed?.type) {
-      sendMessage(chatId,
-        "🤔 I couldn't quite understand that transaction. Could you rephrase?\n\n" +
-        "Example: <code>lunch 10k sayuri</code> or <code>coffee 5.50 - chloe</code>", "HTML");
+      if (!isGroup) {
+        sendMessage(chatId,
+          "🤔 I couldn't quite understand that transaction. Could you rephrase?\n\n" +
+          "Example: <code>lunch 10k sayuri</code> or <code>coffee 5.50 - chloe</code>", "HTML");
+      }
       return HtmlService.createHtmlOutput("unclear");
     }
 
