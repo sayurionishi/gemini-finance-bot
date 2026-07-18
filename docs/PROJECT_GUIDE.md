@@ -132,13 +132,30 @@ KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY. `k`/`m` shorthand ("10k" = 10,000) works
 
 - **Repayments as their own row type.** `/settle X paid Y <amt> [comment]` stores a
   `repayment` row (reusing columns: `User`=from, `PaidBy`=to, `Note`=optional comment,
-  `Category`="Repayment"). Parsing splits on " paid " and treats the **first numeric
-  token** on the right as the amount, so multi-word names stay intact and anything after
-  the amount becomes the comment (a leading "for" is stripped). It's subtracted from the
-  settlement math but **excluded** from `/report`, `/trip`, `/today`, `/person` (they
-  filter to `expense` only), and rendered as "from → to (comment)" with a 🔄 emoji in
-  `/list` and `/search`. Names are validated against the roster so a typo can't create a
-  phantom member that dilutes the equal share. No schema migration needed.
+  `Category`="Repayment"). Shared parsing lives in `parseRepayment()`: it splits at the
+  **first** " paid " (so a comment containing the word "paid" doesn't break the match)
+  and treats the first numeric token on the right as the amount, so multi-word names
+  stay intact and anything after the amount becomes the comment (leading "for"
+  stripped). Both names are resolved against the roster — an unrecognized name is
+  rejected rather than silently becoming a phantom member that dilutes the equal share.
+  Repayments are subtracted from the settlement math but **excluded** from `/report`,
+  `/trip`, `/today`, `/person` (they filter to `expense` only), and rendered as
+  "from → to (comment)" with a 🔄 emoji in `/list`, `/search`, `/undo`, and `/delete`.
+  `/edit` refuses to touch `payer`/`category` on a repayment row (only `note`/`amount`
+  are safe — the columns mean something different for this row type); attempting it
+  returns a clear "delete and re-record" message instead of silently corrupting the row.
+  `getSettlement` only shows "no expenses to settle" when there are truly zero rows of
+  either kind — a repayment recorded before any expense still surfaces. No schema
+  migration needed.
+
+- **Plain-text "X paid Y" is intercepted before Gemini, not just `/settle`.** Gemini's
+  parsing prompt teaches it "name before 'paid'" as an *expense* pattern (for phrasing
+  like "chloe paid 1350 for dinner"), so a bare message like `Chloe paid Sayuri 50`
+  would otherwise be booked as an expense and inflate the settlement pot — exactly
+  backwards for a repayment. `doPost` runs `parseRepayment()` against the roster before
+  calling Gemini (both the single-line and per-line multi-line paths); if it matches a
+  real "member paid member amount" shape, it's recorded as a repayment and Gemini is
+  never called for that line.
 
 - **Bot-join detection uses `my_chat_member`, not `new_chat_members`.** The latter is
   unreliable in modern supergroups. `my_chat_member` fires reliably; we welcome only on
@@ -215,6 +232,13 @@ Chronological summary of the changes made across sessions. Most recent last.
 - **PR #9** — **Repayment recording**: `/settle X paid Y <amt> [comment]` records a
   repayment that adjusts the settlement, with an optional comment ("for dinner"), roster
   validation, and no schema migration. Added this PROJECT_GUIDE and a README pointer.
+  Peer-review follow-up: plain-text "X paid Y" is now intercepted before Gemini (was
+  being booked as an expense); `/edit` refuses unsafe fields on repayment rows;
+  `/undo`/`/delete` describe repayments correctly instead of with expense labels;
+  `getSettlement` no longer hides a repayment-only balance; `/search` only matches the
+  `User` column for repayment rows (was inflating expense-search totals); repayment
+  parsing consolidated into a single `parseRepayment()` helper used by both `/settle`
+  and the plain-text path.
 
 ---
 
