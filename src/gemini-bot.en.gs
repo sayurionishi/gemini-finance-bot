@@ -328,7 +328,9 @@ function doPost(e) {
         "• <code>/trip</code> – Full trip summary per person\n" +
         "• <code>/today</code> – Today's expenses by person\n" +
         "• <code>/person &lt;name&gt;</code> – All transactions by a person\n" +
-        "• <code>/settle</code> – Settlement: who pays whom\n\n" +
+        "• <code>/settle</code> – Settlement: who pays whom\n" +
+        "• <code>/settle Chloe paid Sayuri 50 [for dinner]</code> – Record a repayment\n" +
+        "• <code>/summary</code> – Trip summary + settlement in one recap\n\n" +
         "📋 History:\n" +
         "• <code>/list</code> – Last 10 transactions with IDs\n" +
         "• <code>/list 20</code> – Last 20 transactions\n" +
@@ -483,8 +485,54 @@ function doPost(e) {
       return HtmlService.createHtmlOutput("ok");
     }
 
-    if (command === "/settle") {
+    if (commandBase === "/settle") {
+      // With args: record a repayment, e.g. "/settle Chloe paid Sayuri 50"
+      // or "/settle Chloe paid Sayuri 50 for dinner" (optional comment).
+      // Split on " paid " to separate the two names; the FIRST numeric token
+      // on the right is the amount, so multi-word names ("Kristel Chloe")
+      // stay intact and anything after the amount becomes the comment.
+      if (args) {
+        const roster = getMembers(chatId);
+        const rp = parseRepayment(args, roster);
+        if (rp.error === "nomatch") {
+          sendMessage(chatId,
+            "⚠️ Usage: <code>/settle &lt;from&gt; paid &lt;to&gt; &lt;amount&gt; [comment]</code>\n\n" +
+            "Examples:\n<code>/settle Chloe paid Sayuri 50</code>\n" +
+            "<code>/settle Chloe paid Sayuri 50 for dinner</code>\n\n" +
+            "Or send <code>/settle</code> alone to see who owes whom.", "HTML");
+          return HtmlService.createHtmlOutput("ok");
+        }
+        if (rp.error === "notmember") {
+          sendMessage(chatId,
+            `⚠️ "<b>${escapeHtml(rp.bad)}</b>" isn't a trip member.\n` +
+            `Members: ${escapeHtml(roster.join(", "))}\n\n` +
+            `Add them with <code>/setmembers</code> first.`, "HTML");
+          return HtmlService.createHtmlOutput("ok");
+        }
+        if (rp.error === "same") {
+          sendMessage(chatId, "⚠️ A repayment needs two different people.", "HTML");
+          return HtmlService.createHtmlOutput("ok");
+        }
+        recordRepayment(chatId, rp.from, rp.to, rp.amount, rp.comment);
+        sendMessage(chatId,
+          `✅ Recorded repayment:\n<b>${escapeHtml(rp.from)}</b> → <b>${escapeHtml(rp.to)}</b> ${formatAmount(rp.amount, currency)}` +
+          (rp.comment ? `\n💬 ${escapeHtml(rp.comment)}` : "") +
+          `\n\nSend /settle to see the updated balance.`, "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
       sendChunked(chatId, getSettlement(chatId), "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /summary — trip + settlement in one recap, for wrapping up a trip
+    if (command === "/summary") {
+      const tripPart = getTripSummary(chatId);
+      // Both helpers return the same "📭 no data" message when the sheet is
+      // empty — show it once instead of duplicating with a separator.
+      const summary = tripPart.startsWith("📭")
+        ? tripPart
+        : `${tripPart}\n\n———\n\n${getSettlement(chatId)}`;
+      sendChunked(chatId, summary, "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -513,12 +561,14 @@ function doPost(e) {
         sendMessage(chatId,
           `⚠️ Transaction <code>#${rowNum}</code> not found.\nUse /list to see valid IDs.`, "HTML");
       } else {
-        const [, , type, amt, note, , paidBy] = deleted;
-        sendMessage(chatId,
-          `🗑️ Deleted <code>#${rowNum}</code>:\n` +
-          `• <b>${escapeHtml(note || "?")}</b> ${formatAmount(Number(amt || 0), currency)}\n` +
-          `• Paid by: ${escapeHtml(paidBy || "?")}`,
-          "HTML");
+        const [, user, type, amt, note, , paidBy] = deleted;
+        // Repayment rows: User = from, PaidBy = to, Note = optional comment
+        const line = String(type).toLowerCase() === "repayment"
+          ? `• 🔄 <b>${escapeHtml(user || "?")} → ${escapeHtml(paidBy || "?")}</b> ${formatAmount(Number(amt || 0), currency)}` +
+            (note ? ` <i>(${escapeHtml(note)})</i>` : "")
+          : `• <b>${escapeHtml(note || "?")}</b> ${formatAmount(Number(amt || 0), currency)}\n` +
+            `• Paid by: ${escapeHtml(paidBy || "?")}`;
+        sendMessage(chatId, `🗑️ Deleted <code>#${rowNum}</code>:\n${line}`, "HTML");
       }
       return HtmlService.createHtmlOutput("ok");
     }
@@ -550,6 +600,10 @@ function doPost(e) {
         sendMessage(chatId, "⚠️ Invalid amount — please provide a number.", "HTML");
       } else if (result.error === "badcategory") {
         sendMessage(chatId, "⚠️ Invalid category.\nOptions: Food, Transport, Accommodation, Activities, Shopping, Other", "HTML");
+      } else if (result.error === "repayment") {
+        sendMessage(chatId,
+          `⚠️ <code>#${rowNum}</code> is a repayment — only <code>note</code> and <code>amount</code> can be edited.\n` +
+          `To change who paid whom, <code>/delete ${rowNum}</code> and re-record with /settle.`, "HTML");
       } else {
         sendMessage(chatId, `✅ Transaction <code>#${rowNum}</code> updated: <b>${escapeHtml(field)}</b> → ${escapeHtml(result.display)}`, "HTML");
       }
@@ -615,11 +669,18 @@ function doPost(e) {
         return HtmlService.createHtmlOutput("ok");
       }
       const tz = getTimezone(chatId);
+      // Repayment rows: User = from, PaidBy = to, Note = optional comment —
+      // describe them as a transfer so the user confirms the right thing.
+      const body = String(last.type).toLowerCase() === "repayment"
+        ? `🔄 Repayment: <b>${escapeHtml(last.user || "?")} → ${escapeHtml(last.paidBy || "?")}</b> ${formatAmount(last.amount, currency)}` +
+          (last.note ? `\n💬 ${escapeHtml(last.note)}` : "")
+        : `💬 ${escapeHtml(last.note)}\n` +
+          `💸 ${last.type} ${formatAmount(last.amount, currency)} (${last.category || "Uncategorized"})\n` +
+          `👤 Paid by: ${escapeHtml(last.paidBy || "Unknown")}`;
       const confirmText =
         `❗ <b>Last transaction:</b>\n` +
-        `📅 ${Utilities.formatDate(new Date(last.date), tz, "EEE, d MMM yyyy HH:mm")}\n💬 ${escapeHtml(last.note)}\n` +
-        `💸 ${last.type} ${formatAmount(last.amount, currency)} (${last.category || "Uncategorized"})\n` +
-        `👤 Paid by: ${escapeHtml(last.paidBy || "Unknown")}\n\n` +
+        `📅 ${Utilities.formatDate(new Date(last.date), tz, "EEE, d MMM yyyy HH:mm")}\n` +
+        `${body}\n\n` +
         `Reply with <b>/confirm</b> to delete this transaction.`;
       sendMessage(chatId, confirmText, "HTML");
       return HtmlService.createHtmlOutput("ok");
@@ -652,6 +713,14 @@ function doPost(e) {
       const successes = [];
       const failures = [];
       for (const line of lines) {
+        // "Chloe paid Sayuri 50" between two roster members is a repayment —
+        // intercept it before Gemini books it as an expense that inflates the pot.
+        const rpLine = parseRepayment(line, members);
+        if (!rpLine.error) {
+          recordRepayment(chatId, rpLine.from, rpLine.to, rpLine.amount, rpLine.comment);
+          successes.push({ type: "repayment", amount: rpLine.amount, note: `${rpLine.from} → ${rpLine.to}`, paidBy: rpLine.from });
+          continue;
+        }
         const p = parseAndReactWithGemini(line, senderName, currency, members);
         if (p?.amount != null) p.amount = Number(p.amount);
         if (!p?.amount || !p?.type) {
@@ -670,6 +739,9 @@ function doPost(e) {
         return HtmlService.createHtmlOutput("unclear");
       }
       const rows = successes.map(p => {
+        if (p.type === "repayment") {
+          return `• 🔄 <b>${escapeHtml(p.note)}</b> ${formatAmount(p.amount, currency)}`;
+        }
         const paidByLabel = p.paidBy || senderName;
         return `• <b>${escapeHtml(p.note || p.type)}</b> ${formatAmount(p.amount, currency)} — ${escapeHtml(paidByLabel)}`;
       });
@@ -678,6 +750,19 @@ function doPost(e) {
         reply += `\n\n⚠️ Couldn't parse:\n` + failures.map(f => `• ${escapeHtml(f)}`).join("\n");
       }
       sendChunked(chatId, reply, "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // Single-line: "Chloe paid Sayuri 50 [comment]" between two roster members
+    // is a repayment — record it as such instead of letting Gemini book it as
+    // an expense (its prompt explicitly treats "X paid ..." as an expense).
+    const rp = parseRepayment(text, members);
+    if (!rp.error) {
+      recordRepayment(chatId, rp.from, rp.to, rp.amount, rp.comment);
+      sendMessage(chatId,
+        `🔄 Recorded repayment: <b>${escapeHtml(rp.from)}</b> → <b>${escapeHtml(rp.to)}</b> ${formatAmount(rp.amount, currency)}` +
+        (rp.comment ? `\n💬 ${escapeHtml(rp.comment)}` : "") +
+        `\n\nSend /settle to see the updated balance. Not a repayment? /undo to remove it.`, "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 
@@ -1095,6 +1180,45 @@ function getPersonTransactions(name, chatId) {
 // SETTLEMENT — equal-split across the chat's members,
 // greedy algorithm to minimise number of transfers
 // =====================================================
+// Records a repayment between two people. Stored as its own row type so it
+// never pollutes expense/income reports; only getSettlement reads it back.
+// Column layout for a repayment row:
+//   User = from (payer), Note = optional comment, Category = "Repayment",
+//   PaidBy = to (recipient).
+function recordRepayment(chatId, from, to, amount, comment) {
+  const sh = ensureSheet(chatId);
+  sh.appendRow([new Date(), from, "repayment", amount, comment || "", "Repayment", to]);
+}
+
+// Parses "<from> paid <to> <amount> [comment]" against the roster.
+// Splits at the FIRST " paid " (so a comment containing "paid" still works)
+// and treats the first numeric token after it as the amount, keeping
+// multi-word names intact. Returns {from, to, amount, comment} on success,
+// or {error, bad?}: "nomatch" (shape doesn't fit), "notmember" (bad = the
+// unrecognized name), "same" (payer and recipient are the same person).
+function parseRepayment(text, roster) {
+  const m = String(text).match(/^(.*?)\s+paid\s+(.+)$/i);
+  if (!m) return { error: "nomatch" };
+  const fromRaw = m[1].trim();
+  const rightTokens = m[2].trim().split(/\s+/);
+  let amtIdx = -1, amount = NaN;
+  for (let i = 0; i < rightTokens.length; i++) {
+    const v = parseAmountInput(rightTokens[i]);
+    if (!isNaN(v) && v > 0) { amtIdx = i; amount = v; break; }
+  }
+  // Need a payer name and at least one recipient token before the amount.
+  if (!fromRaw || amtIdx < 1) return { error: "nomatch" };
+  const toRaw = rightTokens.slice(0, amtIdx).join(" ").trim();
+  const comment = rightTokens.slice(amtIdx + 1).join(" ").replace(/^for\s+/i, "").trim();
+  const resolve = n => roster.find(r => r.toLowerCase() === n.toLowerCase());
+  const from = resolve(fromRaw);
+  const to = resolve(toRaw);
+  if (!from) return { error: "notmember", bad: fromRaw };
+  if (!to) return { error: "notmember", bad: toRaw };
+  if (from === to) return { error: "same" };
+  return { from, to, amount, comment };
+}
+
 function getSettlement(chatId) {
   const tabName = getSheetTabName(chatId);
   const currency = getCurrency(chatId);
@@ -1104,26 +1228,48 @@ function getSettlement(chatId) {
 
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
   const paid = {};
+  const repayments = [];
   let grandTotal = 0;
 
   data.forEach(row => {
-    const [, user, type, amt, , , paidBy] = row;
-    if (type.toLowerCase() !== "expense") return;
+    const [, user, type, amt, note, , paidBy] = row;
+    const t = (type || "").toLowerCase();
+    if (t === "repayment") {
+      // User = from (payer), PaidBy = to (recipient), Note = optional comment
+      repayments.push({ from: user || "Unknown", to: paidBy || "Unknown", amt: Number(amt || 0), note: note || "" });
+      return;
+    }
+    if (t !== "expense") return;
     const name = paidBy || user || "Unknown";
     paid[name] = (paid[name] || 0) + Number(amt || 0);
     grandTotal += Number(amt || 0);
   });
 
-  if (grandTotal === 0) return "📭 No expenses to settle.";
+  // Only bail out when there's truly nothing to show — a repayment recorded
+  // before any expense (or after all expenses were deleted) should still
+  // surface as an imbalance, not get swallowed by this early return.
+  if (grandTotal === 0 && repayments.length === 0) return "📭 No expenses to settle.";
 
-  // Include the chat's roster + anyone who has actually paid (so removed
-  // members with existing transactions still appear)
-  const allMembers = [...new Set([...getMembers(chatId), ...Object.keys(paid)])];
+  // Include the chat's roster + anyone who has paid or been part of a repayment
+  const allMembers = [...new Set([
+    ...getMembers(chatId),
+    ...Object.keys(paid),
+    ...repayments.flatMap(r => [r.from, r.to]),
+  ])];
   const share = grandTotal / allMembers.length;
 
   // balance > 0 = owed money; balance < 0 = owes money
   const balance = {};
   allMembers.forEach(p => { balance[p] = (paid[p] || 0) - share; });
+
+  // A repayment settles debt: the payer's shortfall shrinks, the receiver's
+  // surplus shrinks by the same amount.
+  repayments.forEach(r => {
+    if (balance[r.from] === undefined) balance[r.from] = 0;
+    if (balance[r.to] === undefined) balance[r.to] = 0;
+    balance[r.from] += r.amt;
+    balance[r.to]   -= r.amt;
+  });
 
   // Greedy: repeatedly pair the biggest creditor with the biggest debtor
   const settlements = [];
@@ -1148,7 +1294,15 @@ function getSettlement(chatId) {
     result += `• ${escapeHtml(p)}: ${formatAmount(paid[p] || 0, currency)}\n`;
   });
 
-  result += `\n<b>Transfers needed:</b>\n`;
+  if (repayments.length > 0) {
+    result += `\n<b>Repayments already made:</b>\n`;
+    repayments.forEach(r => {
+      result += `• ${escapeHtml(r.from)} → ${escapeHtml(r.to)}: ${formatAmount(r.amt, currency)}` +
+        (r.note ? ` <i>(${escapeHtml(r.note)})</i>` : "") + `\n`;
+    });
+  }
+
+  result += `\n<b>Transfers still needed:</b>\n`;
   if (settlements.length === 0) {
     result += `✅ Everyone's even — nothing to settle!`;
   } else {
@@ -1277,9 +1431,16 @@ function listTransactions(chatId, n) {
   // Show most-recent first
   for (let i = data.length - 1; i >= 0; i--) {
     const rowNum = startRow + i;
-    const [ts, , type, amt, note, , paidBy] = data[i];
+    const [ts, user, type, amt, note, , paidBy] = data[i];
     const date = ts ? Utilities.formatDate(new Date(ts), tz, "M/d") : "?";
-    const emoji = type?.toLowerCase() === "income" ? "💰" : "💸";
+    const t = type?.toLowerCase();
+    if (t === "repayment") {
+      // Repayment row: User = from, PaidBy = to, Note = optional comment
+      result += `<code>#${rowNum}</code> 🔄 [${date}] <b>${escapeHtml(user || "?")} → ${escapeHtml(paidBy || "?")}</b> ${formatAmount(Number(amt || 0), currency)}` +
+        (note ? ` <i>(${escapeHtml(note)})</i>` : "") + `\n`;
+      continue;
+    }
+    const emoji = t === "income" ? "💰" : "💸";
     result += `<code>#${rowNum}</code> ${emoji} [${date}] <b>${escapeHtml(note || "?")}</b> ${formatAmount(Number(amt || 0), currency)} — ${escapeHtml(paidBy || "?")}\n`;
   }
   return result;
@@ -1404,6 +1565,15 @@ function editTransaction(chatId, rowNum, field, value, currency) {
   const sh = ss.getSheetByName(tabName);
   if (!sh || rowNum <= 1 || rowNum > sh.getLastRow()) return { error: "notfound" };
 
+  // Repayment rows use a different column layout (User=from, PaidBy=to), so a
+  // "payer" edit would silently change the recipient — and an unvalidated name
+  // would become a phantom member in /settle's share math. Only note (comment)
+  // and amount are safe to edit; anything else: delete and re-record.
+  const rowType = String(sh.getRange(rowNum, 3).getValue() || "").toLowerCase();
+  if (rowType === "repayment" && field !== "note" && field !== "description" && field !== "amount") {
+    return { error: "repayment" };
+  }
+
   const VALID_CATEGORIES = ["Food", "Transport", "Accommodation", "Activities", "Shopping", "Other"];
   let col, newValue, display;
 
@@ -1453,10 +1623,16 @@ function searchTransactions(chatId, keyword) {
   const matches = [];
 
   data.forEach((row, idx) => {
-    const [ts, , type, amt, note, category, paidBy] = row;
+    const [ts, user, type, amt, note, category, paidBy] = row;
     if (!ts) return;
-    if ([note, category, paidBy].join(" ").toLowerCase().includes(q)) {
-      matches.push({ rowNum: idx + 2, ts: new Date(ts), type, amt: Number(amt || 0), note, category, paidBy });
+    // For repayments, User is the "from" side and only matches there make
+    // them findable by payer name. For expenses/income, User is just who
+    // typed the message — matching it would pull in unrelated rows and
+    // inflate the expense total below, so it's excluded there.
+    const isRepayment = (type || "").toLowerCase() === "repayment";
+    const haystack = isRepayment ? [note, category, paidBy, user] : [note, category, paidBy];
+    if (haystack.join(" ").toLowerCase().includes(q)) {
+      matches.push({ rowNum: idx + 2, ts: new Date(ts), type, amt: Number(amt || 0), note, category, paidBy, user });
     }
   });
 
@@ -1472,7 +1648,13 @@ function searchTransactions(chatId, keyword) {
   let result = `🔍 <b>Results for "${safeKeyword}"</b> (${matches.length} found)\n\n`;
   shown.forEach(m => {
     const d = Utilities.formatDate(m.ts, tz, "M/d");
-    const emoji = m.type?.toLowerCase() === "income" ? "💰" : "💸";
+    const mt = m.type?.toLowerCase();
+    if (mt === "repayment") {
+      result += `<code>#${m.rowNum}</code> 🔄 [${d}] <b>${escapeHtml(m.user || "?")} → ${escapeHtml(m.paidBy || "?")}</b> ${formatAmount(m.amt, currency)}` +
+        (m.note ? ` <i>(${escapeHtml(m.note)})</i>` : "") + `\n`;
+      return;
+    }
+    const emoji = mt === "income" ? "💰" : "💸";
     result += `<code>#${m.rowNum}</code> ${emoji} [${d}] <b>${escapeHtml(m.note || "?")}</b> ${formatAmount(m.amt, currency)} — ${escapeHtml(m.paidBy || "?")}\n`;
   });
   if (matches.length > 20) result += `<i>…and ${matches.length - 20} earlier result${matches.length - 20 > 1 ? "s" : ""}</i>\n`;

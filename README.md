@@ -9,6 +9,12 @@
 
 ---
 
+> 📖 **Developers / maintainers:** see **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)**
+> for architecture, design decisions, gotchas, and work history — a single context file
+> to get up to speed (or hand to a fresh AI session) quickly.
+
+---
+
 ## 🌐 Language Versions
 
 | Language | File | Description |
@@ -277,6 +283,12 @@ The bot records each line as a separate transaction and replies with a combined 
 | `/today` | Today’s expenses itemized by person |
 | `/person <name>` | All expenses paid by one person across the whole trip |
 | `/settle` | Settlement: assuming equal split, who pays whom and exactly how much |
+| `/settle <from> paid <to> <amount> [comment]` | Record a repayment (e.g. `/settle Chloe paid Sayuri 50 for dinner`); it's subtracted from the settlement |
+| `/summary` | Trip summary + settlement in one recap — handy when a trip wraps up |
+
+> 💡 You don't need the `/settle` prefix for this — just typing `Chloe paid Sayuri 50`
+> in the chat is recognized as a repayment too, as long as both names are current trip
+> members.
 
 ---
 
