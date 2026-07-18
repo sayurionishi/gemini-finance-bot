@@ -80,7 +80,7 @@ KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY. `k`/`m` shorthand ("10k" = 10,000) works
 | `/today` | Today's expenses by person |
 | `/person <name>` | All transactions by one person (supports multi-word names) |
 | `/settle` | Who pays whom (equal split, minimum transfers) |
-| `/settle <from> paid <to> <amt>` | **Record a repayment** — e.g. `/settle Chloe paid Sayuri 50` |
+| `/settle <from> paid <to> <amt> [comment]` | **Record a repayment** — e.g. `/settle Chloe paid Sayuri 50 for dinner` (comment optional) |
 | **History / editing** | |
 | `/list` / `/list 20` | Last N transactions with IDs |
 | `/delete <id>` | Delete a transaction by ID |
@@ -130,10 +130,14 @@ KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY. `k`/`m` shorthand ("10k" = 10,000) works
   for messages with no digits, and stays silent when it can't parse a message — so it
   doesn't spam normal conversation. In DMs it still replies with helpful errors.
 
-- **Repayments as their own row type.** `/settle X paid Y <amt>` stores a `repayment`
-  row (reusing columns: `PaidBy`=from, `Note`=to). It's subtracted from the settlement
-  math but **excluded** from `/report`, `/trip`, `/today`, `/person` (they filter to
-  `expense` only). Names are validated against the roster so a typo can't create a
+- **Repayments as their own row type.** `/settle X paid Y <amt> [comment]` stores a
+  `repayment` row (reusing columns: `User`=from, `PaidBy`=to, `Note`=optional comment,
+  `Category`="Repayment"). Parsing splits on " paid " and treats the **first numeric
+  token** on the right as the amount, so multi-word names stay intact and anything after
+  the amount becomes the comment (a leading "for" is stripped). It's subtracted from the
+  settlement math but **excluded** from `/report`, `/trip`, `/today`, `/person` (they
+  filter to `expense` only), and rendered as "from → to (comment)" with a 🔄 emoji in
+  `/list` and `/search`. Names are validated against the roster so a typo can't create a
   phantom member that dilutes the equal share. No schema migration needed.
 
 - **Bot-join detection uses `my_chat_member`, not `new_chat_members`.** The latter is
@@ -208,8 +212,9 @@ Chronological summary of the changes made across sessions. Most recent last.
   unparseable messages in groups (DMs still get helpful errors).
 - **PR #8** — `/undo` date now uses the chat timezone (was showing KST); escaped
   `note`/`paidBy` in the undo confirmation.
-- **PR #9** — **Repayment recording**: `/settle X paid Y <amt>` records a repayment
-  that adjusts the settlement, with roster validation and no schema migration.
+- **PR #9** — **Repayment recording**: `/settle X paid Y <amt> [comment]` records a
+  repayment that adjusts the settlement, with an optional comment ("for dinner"), roster
+  validation, and no schema migration. Added this PROJECT_GUIDE and a README pointer.
 
 ---
 
@@ -231,4 +236,6 @@ Chronological summary of the changes made across sessions. Most recent last.
   speculative features. When proposing a feature, give an honest "is this worth it" take.
 - **Peer review before merge.** We do a self/peer review pass on each PR and apply the
   real bugs found (skipping style nits).
+- **Keep this guide current.** Whenever a change adds/alters a command, decision, or
+  gotcha, update this file (sections 3, 4, 6, 7) as part of the same PR.
 - **Secrets never committed.** Real tokens/keys live only in the Apps Script editor.
