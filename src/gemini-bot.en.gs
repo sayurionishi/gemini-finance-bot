@@ -329,7 +329,8 @@ function doPost(e) {
         "• <code>/today</code> – Today's expenses by person\n" +
         "• <code>/person &lt;name&gt;</code> – All transactions by a person\n" +
         "• <code>/settle</code> – Settlement: who pays whom\n" +
-        "• <code>/settle Chloe paid Sayuri 50 [for dinner]</code> – Record a repayment\n\n" +
+        "• <code>/settle Chloe paid Sayuri 50 [for dinner]</code> – Record a repayment\n" +
+        "• <code>/summary</code> – Trip summary + settlement in one recap\n\n" +
         "📋 History:\n" +
         "• <code>/list</code> – Last 10 transactions with IDs\n" +
         "• <code>/list 20</code> – Last 20 transactions\n" +
@@ -520,6 +521,18 @@ function doPost(e) {
         return HtmlService.createHtmlOutput("ok");
       }
       sendChunked(chatId, getSettlement(chatId), "HTML");
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /summary — trip + settlement in one recap, for wrapping up a trip
+    if (command === "/summary") {
+      const tripPart = getTripSummary(chatId);
+      // Both helpers return the same "📭 no data" message when the sheet is
+      // empty — show it once instead of duplicating with a separator.
+      const summary = tripPart.startsWith("📭")
+        ? tripPart
+        : `${tripPart}\n\n———\n\n${getSettlement(chatId)}`;
+      sendChunked(chatId, summary, "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
 

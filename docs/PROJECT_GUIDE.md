@@ -81,6 +81,7 @@ KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY. `k`/`m` shorthand ("10k" = 10,000) works
 | `/person <name>` | All transactions by one person (supports multi-word names) |
 | `/settle` | Who pays whom (equal split, minimum transfers) |
 | `/settle <from> paid <to> <amt> [comment]` | **Record a repayment** — e.g. `/settle Chloe paid Sayuri 50 for dinner` (comment optional) |
+| `/summary` | `/trip` + `/settle` concatenated into one recap — for wrapping up a trip |
 | **History / editing** | |
 | `/list` / `/list 20` | Last N transactions with IDs |
 | `/delete <id>` | Delete a transaction by ID |
@@ -238,7 +239,9 @@ Chronological summary of the changes made across sessions. Most recent last.
   `getSettlement` no longer hides a repayment-only balance; `/search` only matches the
   `User` column for repayment rows (was inflating expense-search totals); repayment
   parsing consolidated into a single `parseRepayment()` helper used by both `/settle`
-  and the plain-text path.
+  and the plain-text path. Also added `/summary` — `getTripSummary()` +
+  `getSettlement()` concatenated into one recap message for wrapping up a trip
+  (dedupes the "no data" message when the sheet is empty rather than showing it twice).
 
 ---
 
@@ -246,10 +249,12 @@ Chronological summary of the changes made across sessions. Most recent last.
 
 - **Stray income row:** An `income` row was created accidentally by Gemini (it tags
   "received money back / reimbursed" as income). It shows only in `/report` and doesn't
-  affect `/settle`. Recommend deleting it via `/list` → `/delete <id>`. Now that
-  repayments have a proper home, this misuse of `income` shouldn't recur.
+  affect `/settle`. **Still needs manual cleanup** — find it with `/list` (or
+  `/list 20`, look for the 💰 emoji) and remove it with `/delete <id>`. This can only be
+  done from Telegram; there's no sheet-level access from this codebase/session. Now
+  that repayments have a proper home, this misuse of `income` shouldn't recur.
 - Possible future: validate/limit when Gemini invents an `income` type; a `/balance`
-  per-person quick view; export/summary at trip end.
+  per-person quick view.
 
 ---
 
