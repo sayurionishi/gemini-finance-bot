@@ -328,7 +328,8 @@ function doPost(e) {
         "• <code>/trip</code> – Full trip summary per person\n" +
         "• <code>/today</code> – Today's expenses by person\n" +
         "• <code>/person &lt;name&gt;</code> – All transactions by a person\n" +
-        "• <code>/settle</code> – Settlement: who pays whom\n\n" +
+        "• <code>/settle</code> – Settlement: who pays whom\n" +
+        "• <code>/settle Chloe paid Sayuri 50</code> – Record a repayment\n\n" +
         "📋 History:\n" +
         "• <code>/list</code> – Last 10 transactions with IDs\n" +
         "• <code>/list 20</code> – Last 20 transactions\n" +
@@ -483,7 +484,52 @@ function doPost(e) {
       return HtmlService.createHtmlOutput("ok");
     }
 
-    if (command === "/settle") {
+    if (commandBase === "/settle") {
+      // With args: record a repayment, e.g. "/settle Chloe paid Sayuri 50".
+      // Splitting on " paid " (and taking the trailing token as the amount)
+      // keeps multi-word names like "Kristel Chloe" intact on both sides.
+      if (args) {
+        const parts = args.split(/\s+paid\s+/i);
+        if (parts.length !== 2) {
+          sendMessage(chatId,
+            "⚠️ Usage: <code>/settle &lt;from&gt; paid &lt;to&gt; &lt;amount&gt;</code>\n\n" +
+            "Example: <code>/settle Chloe paid Sayuri 50</code>\n\n" +
+            "Or send <code>/settle</code> alone to see who owes whom.", "HTML");
+          return HtmlService.createHtmlOutput("ok");
+        }
+        const rightTokens = parts[1].trim().split(/\s+/);
+        const amount = parseAmountInput(rightTokens.pop());
+        const fromRaw = parts[0].trim();
+        const toRaw = rightTokens.join(" ").trim();
+        if (!fromRaw || !toRaw || isNaN(amount) || amount <= 0) {
+          sendMessage(chatId,
+            "⚠️ Couldn't read that. Format: <code>/settle Chloe paid Sayuri 50</code>", "HTML");
+          return HtmlService.createHtmlOutput("ok");
+        }
+        // Resolve both names against the roster so a typo can't create a
+        // phantom member that dilutes everyone's equal share in /settle.
+        const roster = getMembers(chatId);
+        const resolve = n => roster.find(m => m.toLowerCase() === n.toLowerCase());
+        const from = resolve(fromRaw);
+        const to = resolve(toRaw);
+        if (!from || !to) {
+          const bad = !from ? fromRaw : toRaw;
+          sendMessage(chatId,
+            `⚠️ "<b>${escapeHtml(bad)}</b>" isn't a trip member.\n` +
+            `Members: ${escapeHtml(roster.join(", "))}\n\n` +
+            `Add them with <code>/setmembers</code> first.`, "HTML");
+          return HtmlService.createHtmlOutput("ok");
+        }
+        if (from === to) {
+          sendMessage(chatId, "⚠️ A repayment needs two different people.", "HTML");
+          return HtmlService.createHtmlOutput("ok");
+        }
+        recordRepayment(chatId, from, to, amount);
+        sendMessage(chatId,
+          `✅ Recorded repayment:\n<b>${escapeHtml(from)}</b> → <b>${escapeHtml(to)}</b> ${formatAmount(amount, currency)}\n\n` +
+          `Send /settle to see the updated balance.`, "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
       sendChunked(chatId, getSettlement(chatId), "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -1095,6 +1141,14 @@ function getPersonTransactions(name, chatId) {
 // SETTLEMENT — equal-split across the chat's members,
 // greedy algorithm to minimise number of transfers
 // =====================================================
+// Records a repayment between two people. Stored as its own row type so it
+// never pollutes expense/income reports; only getSettlement reads it back.
+// Layout reuses existing columns: PaidBy = payer, Note = recipient.
+function recordRepayment(chatId, from, to, amount) {
+  const sh = ensureSheet(chatId);
+  sh.appendRow([new Date(), from, "repayment", amount, to, "Repayment", from]);
+}
+
 function getSettlement(chatId) {
   const tabName = getSheetTabName(chatId);
   const currency = getCurrency(chatId);
@@ -1104,11 +1158,18 @@ function getSettlement(chatId) {
 
   const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
   const paid = {};
+  const repayments = [];
   let grandTotal = 0;
 
   data.forEach(row => {
-    const [, user, type, amt, , , paidBy] = row;
-    if (type.toLowerCase() !== "expense") return;
+    const [, user, type, amt, note, , paidBy] = row;
+    const t = (type || "").toLowerCase();
+    if (t === "repayment") {
+      // PaidBy = payer (from), Note = recipient (to)
+      repayments.push({ from: paidBy || user || "Unknown", to: note || "Unknown", amt: Number(amt || 0) });
+      return;
+    }
+    if (t !== "expense") return;
     const name = paidBy || user || "Unknown";
     paid[name] = (paid[name] || 0) + Number(amt || 0);
     grandTotal += Number(amt || 0);
@@ -1116,14 +1177,26 @@ function getSettlement(chatId) {
 
   if (grandTotal === 0) return "📭 No expenses to settle.";
 
-  // Include the chat's roster + anyone who has actually paid (so removed
-  // members with existing transactions still appear)
-  const allMembers = [...new Set([...getMembers(chatId), ...Object.keys(paid)])];
+  // Include the chat's roster + anyone who has paid or been part of a repayment
+  const allMembers = [...new Set([
+    ...getMembers(chatId),
+    ...Object.keys(paid),
+    ...repayments.flatMap(r => [r.from, r.to]),
+  ])];
   const share = grandTotal / allMembers.length;
 
   // balance > 0 = owed money; balance < 0 = owes money
   const balance = {};
   allMembers.forEach(p => { balance[p] = (paid[p] || 0) - share; });
+
+  // A repayment settles debt: the payer's shortfall shrinks, the receiver's
+  // surplus shrinks by the same amount.
+  repayments.forEach(r => {
+    if (balance[r.from] === undefined) balance[r.from] = 0;
+    if (balance[r.to] === undefined) balance[r.to] = 0;
+    balance[r.from] += r.amt;
+    balance[r.to]   -= r.amt;
+  });
 
   // Greedy: repeatedly pair the biggest creditor with the biggest debtor
   const settlements = [];
@@ -1148,7 +1221,14 @@ function getSettlement(chatId) {
     result += `• ${escapeHtml(p)}: ${formatAmount(paid[p] || 0, currency)}\n`;
   });
 
-  result += `\n<b>Transfers needed:</b>\n`;
+  if (repayments.length > 0) {
+    result += `\n<b>Repayments already made:</b>\n`;
+    repayments.forEach(r => {
+      result += `• ${escapeHtml(r.from)} → ${escapeHtml(r.to)}: ${formatAmount(r.amt, currency)}\n`;
+    });
+  }
+
+  result += `\n<b>Transfers still needed:</b>\n`;
   if (settlements.length === 0) {
     result += `✅ Everyone's even — nothing to settle!`;
   } else {
@@ -1279,7 +1359,8 @@ function listTransactions(chatId, n) {
     const rowNum = startRow + i;
     const [ts, , type, amt, note, , paidBy] = data[i];
     const date = ts ? Utilities.formatDate(new Date(ts), tz, "M/d") : "?";
-    const emoji = type?.toLowerCase() === "income" ? "💰" : "💸";
+    const t = type?.toLowerCase();
+    const emoji = t === "income" ? "💰" : t === "repayment" ? "🔄" : "💸";
     result += `<code>#${rowNum}</code> ${emoji} [${date}] <b>${escapeHtml(note || "?")}</b> ${formatAmount(Number(amt || 0), currency)} — ${escapeHtml(paidBy || "?")}\n`;
   }
   return result;
@@ -1472,7 +1553,8 @@ function searchTransactions(chatId, keyword) {
   let result = `🔍 <b>Results for "${safeKeyword}"</b> (${matches.length} found)\n\n`;
   shown.forEach(m => {
     const d = Utilities.formatDate(m.ts, tz, "M/d");
-    const emoji = m.type?.toLowerCase() === "income" ? "💰" : "💸";
+    const mt = m.type?.toLowerCase();
+    const emoji = mt === "income" ? "💰" : mt === "repayment" ? "🔄" : "💸";
     result += `<code>#${m.rowNum}</code> ${emoji} [${d}] <b>${escapeHtml(m.note || "?")}</b> ${formatAmount(m.amt, currency)} — ${escapeHtml(m.paidBy || "?")}\n`;
   });
   if (matches.length > 20) result += `<i>…and ${matches.length - 20} earlier result${matches.length - 20 > 1 ? "s" : ""}</i>\n`;
