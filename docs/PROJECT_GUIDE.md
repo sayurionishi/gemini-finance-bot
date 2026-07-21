@@ -269,6 +269,12 @@ Chronological summary of the changes made across sessions. Most recent last.
   person, any protected trait, or slurs/hate speech. `/whoami` and `/help` now show the
   active tone/language; `/start`'s
   onboarding mentions the toggle as an optional extra (not a required setup step).
+  **Multi-line messages** (each line parsed independently, see PR #4) get one reaction
+  per batch, not one per line — piling on N roasts would be spammy. Each line's
+  `parseAndReactWithGemini` call already produces a `reaction`; the multi-line handler
+  picks the one from the priciest expense/income line in the batch (repayments have no
+  `reaction` field, so they're excluded from that pick) rather than firing an extra
+  Gemini call just for a batch-level reaction.
 
 ---
 

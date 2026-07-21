@@ -836,6 +836,13 @@ function doPost(e) {
         return `• <b>${escapeHtml(p.note || p.type)}</b> ${formatAmount(p.amount, currency)} — ${escapeHtml(paidByLabel)}`;
       });
       let reply = `✅ Recorded ${successes.length} transaction${successes.length > 1 ? "s" : ""}:\n` + rows.join("\n");
+      // Repayments carry no Gemini reaction — react to the priciest expense/
+      // income line in the batch instead of piling on one roast per line.
+      const reactable = successes.filter(p => p.type !== "repayment" && p.reaction);
+      if (reactable.length > 0) {
+        const priciest = reactable.reduce((a, b) => (b.amount > a.amount ? b : a));
+        reply += `\n\n${escapeHtml(priciest.reaction)}`;
+      }
       if (failures.length > 0) {
         reply += `\n\n⚠️ Couldn't parse:\n` + failures.map(f => `• ${escapeHtml(f)}`).join("\n");
       }
