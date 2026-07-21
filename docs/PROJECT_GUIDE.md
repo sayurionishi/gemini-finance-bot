@@ -4,7 +4,7 @@
 > built, and *why* the key decisions were made. Attach or mention this file at the start
 > of a new session to continue seamlessly without re-explaining context.
 >
-> **Last updated:** 2026-07-18
+> **Last updated:** 2026-07-21
 
 ---
 
@@ -39,8 +39,8 @@ Telegram chat  ──webhook──▶  doPost(e)  ──▶  command router
 - **Storage:**
   - **Google Sheets** — transaction rows. Columns: `Timestamp | User | Type | Amount | Note | Category | PaidBy`.
   - **Script Properties** — per-chat config keyed by chatId: `CURRENCY_<id>`,
-    `TIMEZONE_<id>`, `MEMBERS_<id>`, `SHEET_TAB_<id>`, `LAST_UNDO_ROW_<id>`,
-    `REMINDERS_<id>`.
+    `TIMEZONE_<id>`, `TONE_<id>`, `LANGUAGE_<id>`, `MEMBERS_<id>`, `SHEET_TAB_<id>`,
+    `LAST_UNDO_ROW_<id>`, `REMINDERS_<id>`.
 
 ### Configuration constants (top of the file)
 ```javascript
@@ -94,6 +94,8 @@ KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY. `k`/`m` shorthand ("10k" = 10,000) works
 | `/setmembers <names>` | Set roster. **Comma-separate multi-word names** |
 | `/setcurrency <code>` | Set currency |
 | `/settimezone <tz>` | Set timezone (IANA, e.g. `Pacific/Auckland`) |
+| `/settone <friendly\|savage>` | Set reaction tone — `friendly` (default) or `savage` (playful roast) |
+| `/setlanguage <en\|tl>` | Set reaction language — `en` (default) or `tl` (Filipino/Taglish) |
 | `/reminders on/off` | Toggle daily reminders |
 
 ---
@@ -161,6 +163,19 @@ KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY. `k`/`m` shorthand ("10k" = 10,000) works
 - **Bot-join detection uses `my_chat_member`, not `new_chat_members`.** The latter is
   unreliable in modern supergroups. `my_chat_member` fires reliably; we welcome only on
   a genuine join transition (absent → present) so promotions/demotions don't re-welcome.
+
+- **Personality toggle is two independent settings, not one.** Tone (`friendly`/`savage`)
+  and language (`en`/`tl`) are separate `/settone` / `/setlanguage` commands with separate
+  Script Properties, mirroring `/setcurrency`/`/settimezone` — so a chat can mix and match
+  (e.g. savage-in-English, or friendly-in-Taglish) instead of one combined "personality"
+  command. Both are opt-in; unset defaults to the current behavior (friendly, English).
+  Only the Gemini-generated `reaction` field is affected — `buildReactionRules(tone,
+  language)` builds a shared instruction block consumed by both
+  `parseAndReactWithGemini` (text messages) and `handleReceiptPhoto` (receipt OCR), so
+  the two prompts can't drift out of sync. Savage is scoped to roasting the *purchase*
+  (price, choice, frequency) — the prompt explicitly forbids insulting the person, any
+  protected trait, or using profanity, so it stays playful banter rather than something
+  that could land as genuinely hurtful.
 
 ---
 
@@ -242,6 +257,16 @@ Chronological summary of the changes made across sessions. Most recent last.
   and the plain-text path. Also added `/summary` — `getTripSummary()` +
   `getSettlement()` concatenated into one recap message for wrapping up a trip
   (dedupes the "no data" message when the sheet is empty rather than showing it twice).
+- **Roast mode personality toggle** — two independent per-chat settings, `/settone
+  friendly|savage` and `/setlanguage en|tl` (default: friendly, English), stored as
+  `TONE_<id>`/`LANGUAGE_<id>` Script Properties via `getTone`/`setTone`/`getLanguage`/
+  `setLanguage`. Threaded into both Gemini call sites that generate a `reaction`
+  (`parseAndReactWithGemini` and `handleReceiptPhoto`) via a shared `buildReactionRules()`
+  prompt-builder. Savage mode is a playful, exaggerated roast of the purchase
+  (mumu-app-inspired, e.g. "1000 pesos for a carwash?? does it come with a hand and foot
+  spa too?"), explicitly barred from insulting the person, any protected trait, or using
+  profanity. `/whoami` and `/help` now show the active tone/language; `/start`'s
+  onboarding mentions the toggle as an optional extra (not a required setup step).
 
 ---
 

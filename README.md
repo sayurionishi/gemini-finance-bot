@@ -362,9 +362,18 @@ The bot supports **per-chat settings** so multiple groups (and a solo chat) can 
 |---------|---------|---------|
 | `/setmembers <names>` | Set the trip roster for this chat | `/setmembers Sayuri Chloe Alex` |
 | `/setcurrency <code>` | Set the currency for this chat | `/setcurrency KRW` |
-| `/whoami` | Show this chat's ID, currency, tab, and members | — |
+| `/settimezone <tz>` | Set the IANA timezone for this chat | `/settimezone Pacific/Auckland` |
+| `/settone <tone>` | Set the reaction tone: `friendly` (default) or `savage` 🔥 | `/settone savage` |
+| `/setlanguage <lang>` | Set the reaction language: `en` (default) or `tl` 🇵🇭 | `/setlanguage tl` |
+| `/whoami` | Show this chat's ID, currency, tab, timezone, tone, language, and members | — |
 
 **Supported currencies:** `KRW` (₩) · `NZD` ($) · `USD` ($) · `AUD` ($) · `PHP` (₱) · `EUR` (€) · `GBP` (£) · `JPY` (¥)
+
+**Roast mode:** `/settone savage` swaps the plain reaction after each logged expense for a
+playful, exaggerated roast of the purchase — think a sassy best friend teasing your
+spending, never a genuine insult of you or anyone else. Pair it with `/setlanguage tl` for
+Filipino/Taglish roasts, e.g. *"1000 pesos for a carwash?? does it come with a hand and foot
+spa too?"* 😂
 
 **Sheet tabs:** Each chat automatically gets its own tab in the Google Sheet — you only configure one `SHEET_ID`. The first chat to message after deploying claims the existing `Transactions` tab; subsequent new chats get a tab named after their chat ID.
 
