@@ -388,7 +388,7 @@ function doPost(e) {
         "• <code>/reminders on/off</code> – Toggle daily reminders\n" +
         "• <code>/undo</code> – Undo last transaction\n" +
         "• <code>/confirm</code> – Confirm deletion\n" +
-        "• <code>/whoami</code> – Chat ID, currency, tab, timezone &amp; members\n\n" +
+        "• <code>/whoami</code> – Chat ID, currency, tab, timezone, tone, language &amp; members\n\n" +
         "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.\n\n" +
         "💱 Current currency: <b>" + currency.code + "</b> (" + currency.symbol + ")\n" +
         "🎭 Current tone: <b>" + toTitleCase(tone) + "</b> · 🌐 Language: <b>" + LANGUAGES[language] + "</b>";
