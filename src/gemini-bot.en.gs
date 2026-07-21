@@ -887,15 +887,19 @@ function doPost(e) {
 // Builds the "reaction" instructions block shared by parseAndReactWithGemini
 // and handleReceiptPhoto, based on the chat's tone (friendly/savage) and
 // language (en/tl) settings. Savage stays a *playful* roast of the purchase —
-// never a genuine insult of the person or any protected trait.
+// never a genuine insult of the person or any protected trait. Mild swearing
+// is allowed for flavor (that's the "mumu"-style Taglish roast this is
+// modeled on) but never slurs or hate speech.
 function buildReactionRules(tone, language) {
   const toneRule = tone === "savage"
     ? `Style: SAVAGE ROAST. React like a sassy, savage best friend playfully roasting this ` +
-      `purchase — exaggerated, sarcastic, dramatic (e.g. "1000 pesos for a carwash?? does it ` +
-      `come with a hand and foot spa too?"). Tease the spending choice, the price, or the ` +
+      `purchase — exaggerated, sarcastic, dramatic (e.g. "Tangina, 1000 pesos para sa ` +
+      `carwash?? May hand and foot spa ba yan?"). Mild swearing/curse words are fine for ` +
+      `flavor (e.g. "tangina", "putangina", "punyeta" in Taglish, or "damn"/"hell" in ` +
+      `English) — that's part of the fun. Tease the spending choice, the price, or the ` +
       `frequency — NEVER the person themselves or any protected trait (appearance, race, ` +
-      `gender, etc.), and no profanity or slurs. It should read as loving banter, not an ` +
-      `actual insult.`
+      `gender, etc.), and never slurs or hate speech. It should read as loving banter ` +
+      `between close friends, not an actual insult.`
     : `Style: FRIENDLY. React like a warm, supportive friend — encouraging and lighthearted.`;
   const languageRule = language === "tl"
     ? `Language: Filipino/Taglish — a natural casual mix of Tagalog and English, the way ` +

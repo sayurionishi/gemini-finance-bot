@@ -371,9 +371,9 @@ The bot supports **per-chat settings** so multiple groups (and a solo chat) can 
 
 **Roast mode:** `/settone savage` swaps the plain reaction after each logged expense for a
 playful, exaggerated roast of the purchase — think a sassy best friend teasing your
-spending, never a genuine insult of you or anyone else. Pair it with `/setlanguage tl` for
-Filipino/Taglish roasts, e.g. *"1000 pesos for a carwash?? does it come with a hand and foot
-spa too?"* 😂
+spending (mild swearing allowed for flavor), never a genuine insult of you or anyone else.
+Pair it with `/setlanguage tl` for Filipino/Taglish roasts, e.g. *"Tangina, 1000 pesos para
+sa carwash?? May hand and foot spa ba yan?"* 😂
 
 **Sheet tabs:** Each chat automatically gets its own tab in the Google Sheet — you only configure one `SHEET_ID`. The first chat to message after deploying claims the existing `Transactions` tab; subsequent new chats get a tab named after their chat ID.
 

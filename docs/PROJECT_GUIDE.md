@@ -173,9 +173,10 @@ KRW, NZD, USD, AUD, PHP, EUR, GBP, JPY. `k`/`m` shorthand ("10k" = 10,000) works
   language)` builds a shared instruction block consumed by both
   `parseAndReactWithGemini` (text messages) and `handleReceiptPhoto` (receipt OCR), so
   the two prompts can't drift out of sync. Savage is scoped to roasting the *purchase*
-  (price, choice, frequency) — the prompt explicitly forbids insulting the person, any
-  protected trait, or using profanity, so it stays playful banter rather than something
-  that could land as genuinely hurtful.
+  (price, choice, frequency), not the person — mild swearing is allowed for flavor (the
+  "mumu"-style Taglish roast this is modeled on), but the prompt explicitly forbids
+  insulting the person, any protected trait, or slurs/hate speech, so it stays playful
+  banter rather than something that could land as genuinely hurtful.
 
 ---
 
@@ -263,9 +264,10 @@ Chronological summary of the changes made across sessions. Most recent last.
   `setLanguage`. Threaded into both Gemini call sites that generate a `reaction`
   (`parseAndReactWithGemini` and `handleReceiptPhoto`) via a shared `buildReactionRules()`
   prompt-builder. Savage mode is a playful, exaggerated roast of the purchase
-  (mumu-app-inspired, e.g. "1000 pesos for a carwash?? does it come with a hand and foot
-  spa too?"), explicitly barred from insulting the person, any protected trait, or using
-  profanity. `/whoami` and `/help` now show the active tone/language; `/start`'s
+  (mumu-app-inspired, e.g. "Tangina, 1000 pesos para sa carwash?? May hand and foot spa ba
+  yan?") — mild swearing allowed for flavor, but explicitly barred from insulting the
+  person, any protected trait, or slurs/hate speech. `/whoami` and `/help` now show the
+  active tone/language; `/start`'s
   onboarding mentions the toggle as an optional extra (not a required setup step).
 
 ---
