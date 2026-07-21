@@ -55,6 +55,44 @@ function setCurrency(chatId, code) {
   return true;
 }
 
+// =====================================================
+// PERSONALITY HELPERS — per-chat tone & language for the
+// Gemini-generated reaction on a logged transaction.
+// Same opt-in pattern as currency/timezone: unset = default.
+// =====================================================
+const DEFAULT_TONE = "friendly";
+const DEFAULT_LANGUAGE = "en";
+const TONES = ["friendly", "savage"];
+const LANGUAGES = { en: "English", tl: "Filipino/Taglish" };
+
+// Returns the chat's reaction tone: "friendly" (default) or "savage".
+function getTone(chatId) {
+  const tone = PropertiesService.getScriptProperties().getProperty(`TONE_${chatId}`);
+  return TONES.includes(tone) ? tone : DEFAULT_TONE;
+}
+
+// Stores the tone choice for a chat. Returns false if unrecognized.
+function setTone(chatId, tone) {
+  const lower = tone.toLowerCase().trim();
+  if (!TONES.includes(lower)) return false;
+  PropertiesService.getScriptProperties().setProperty(`TONE_${chatId}`, lower);
+  return true;
+}
+
+// Returns the chat's reaction language: "en" (default) or "tl".
+function getLanguage(chatId) {
+  const lang = PropertiesService.getScriptProperties().getProperty(`LANGUAGE_${chatId}`);
+  return LANGUAGES[lang] ? lang : DEFAULT_LANGUAGE;
+}
+
+// Stores the language choice for a chat. Returns false if unrecognized.
+function setLanguage(chatId, lang) {
+  const lower = lang.toLowerCase().trim();
+  if (!LANGUAGES[lower]) return false;
+  PropertiesService.getScriptProperties().setProperty(`LANGUAGE_${chatId}`, lower);
+  return true;
+}
+
 // Returns the active member roster for a chat.
 // Per-chat roster if set, otherwise falls back to the global TRIP_MEMBERS.
 function getMembers(chatId) {
@@ -297,6 +335,8 @@ function doPost(e) {
     const args = cleanText.substring(commandBase.length).trim();
 
     const currency = getCurrency(chatId);
+    const tone = getTone(chatId);
+    const language = getLanguage(chatId);
 
     // =====================================================
     // BASIC COMMANDS
@@ -343,12 +383,15 @@ function doPost(e) {
         "• <code>/setmembers &lt;names&gt;</code> – Set trip members for this chat\n" +
         "• <code>/setcurrency &lt;code&gt;</code> – Set currency (" + escapeHtml(supported) + ")\n" +
         "• <code>/settimezone &lt;tz&gt;</code> – Set timezone (e.g. Asia/Seoul)\n" +
+        "• <code>/settone friendly|savage</code> – Set reaction tone (savage = playful roast) 🔥\n" +
+        "• <code>/setlanguage en|tl</code> – Set reaction language (tl = Filipino/Taglish) 🇵🇭\n" +
         "• <code>/reminders on/off</code> – Toggle daily reminders\n" +
         "• <code>/undo</code> – Undo last transaction\n" +
         "• <code>/confirm</code> – Confirm deletion\n" +
-        "• <code>/whoami</code> – Chat ID, currency, tab, timezone &amp; members\n\n" +
+        "• <code>/whoami</code> – Chat ID, currency, tab, timezone, tone, language &amp; members\n\n" +
         "⏰ Daily reminder at " + REMIND_HOUR + ":00, report at " + REPORT_HOUR + ":00.\n\n" +
-        "💱 Current currency: <b>" + currency.code + "</b> (" + currency.symbol + ")";
+        "💱 Current currency: <b>" + currency.code + "</b> (" + currency.symbol + ")\n" +
+        "🎭 Current tone: <b>" + toTitleCase(tone) + "</b> · 🌐 Language: <b>" + LANGUAGES[language] + "</b>";
       sendMessage(chatId, helpText, "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -363,7 +406,9 @@ function doPost(e) {
         `💱 <b>Currency:</b> ${currency.code} (${currency.symbol})\n` +
         `📋 <b>Sheet tab:</b> ${escapeHtml(tabName)}\n` +
         `👥 <b>Members:</b> ${escapeHtml(members.join(", "))}${memberLabel}\n` +
-        `🕐 <b>Timezone:</b> ${escapeHtml(tz)}`,
+        `🕐 <b>Timezone:</b> ${escapeHtml(tz)}\n` +
+        `🎭 <b>Tone:</b> ${toTitleCase(tone)}\n` +
+        `🌐 <b>Language:</b> ${LANGUAGES[language]}`,
         "HTML");
       return HtmlService.createHtmlOutput("ok");
     }
@@ -446,6 +491,51 @@ function doPost(e) {
           `Use IANA timezone IDs. Examples:\n` +
           `<code>Asia/Seoul</code> · <code>Pacific/Auckland</code> · <code>America/New_York</code>`,
           "HTML");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /settone savage  (or "friendly")
+    if (commandBase === "/settone") {
+      const choice = (args.split(/\s+/)[0] || "").toLowerCase();
+      if (!choice) {
+        sendMessage(chatId,
+          `🎭 <b>Current tone:</b> ${toTitleCase(tone)}\n\n` +
+          `Set a new tone:\n` +
+          `<code>/settone friendly</code> – warm, encouraging reactions\n` +
+          `<code>/settone savage</code> – playful roast reactions 🔥 (Taglish-friendly, all in good fun)`,
+          "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      if (setTone(chatId, choice)) {
+        const newTone = getTone(chatId);
+        sendMessage(chatId,
+          newTone === "savage"
+            ? `🔥 Tone set to <b>Savage</b>. Your wallet's about to get roasted.`
+            : `😊 Tone set to <b>Friendly</b>.`,
+          "HTML");
+      } else {
+        sendMessage(chatId, `⚠️ Unknown tone.\nSupported: <b>${TONES.join(", ")}</b>`, "HTML");
+      }
+      return HtmlService.createHtmlOutput("ok");
+    }
+
+    // /setlanguage tl  (or "en")
+    if (commandBase === "/setlanguage") {
+      const choice = (args.split(/\s+/)[0] || "").toLowerCase();
+      if (!choice) {
+        sendMessage(chatId,
+          `🌐 <b>Current language:</b> ${LANGUAGES[language]}\n\n` +
+          `Set a new language for reactions:\n` +
+          `<code>/setlanguage en</code> – English\n` +
+          `<code>/setlanguage tl</code> – Filipino/Taglish`,
+          "HTML");
+        return HtmlService.createHtmlOutput("ok");
+      }
+      if (setLanguage(chatId, choice)) {
+        sendMessage(chatId, `✅ Reaction language set to <b>${LANGUAGES[getLanguage(chatId)]}</b>.`, "HTML");
+      } else {
+        sendMessage(chatId, `⚠️ Unknown language.\nSupported: <b>${Object.keys(LANGUAGES).join(", ")}</b>`, "HTML");
       }
       return HtmlService.createHtmlOutput("ok");
     }
@@ -721,7 +811,7 @@ function doPost(e) {
           successes.push({ type: "repayment", amount: rpLine.amount, note: `${rpLine.from} → ${rpLine.to}`, paidBy: rpLine.from });
           continue;
         }
-        const p = parseAndReactWithGemini(line, senderName, currency, members);
+        const p = parseAndReactWithGemini(line, senderName, currency, members, tone, language);
         if (p?.amount != null) p.amount = Number(p.amount);
         if (!p?.amount || !p?.type) {
           failures.push(line);
@@ -746,6 +836,13 @@ function doPost(e) {
         return `• <b>${escapeHtml(p.note || p.type)}</b> ${formatAmount(p.amount, currency)} — ${escapeHtml(paidByLabel)}`;
       });
       let reply = `✅ Recorded ${successes.length} transaction${successes.length > 1 ? "s" : ""}:\n` + rows.join("\n");
+      // Repayments carry no Gemini reaction — react to the priciest expense/
+      // income line in the batch instead of piling on one roast per line.
+      const reactable = successes.filter(p => p.type !== "repayment" && p.reaction);
+      if (reactable.length > 0) {
+        const priciest = reactable.reduce((a, b) => (b.amount > a.amount ? b : a));
+        reply += `\n\n${escapeHtml(priciest.reaction)}`;
+      }
       if (failures.length > 0) {
         reply += `\n\n⚠️ Couldn't parse:\n` + failures.map(f => `• ${escapeHtml(f)}`).join("\n");
       }
@@ -767,7 +864,7 @@ function doPost(e) {
     }
 
     // Single-line (original flow)
-    const parsed = parseAndReactWithGemini(text, senderName, currency, members);
+    const parsed = parseAndReactWithGemini(text, senderName, currency, members, tone, language);
     // Gemini sometimes returns amounts as strings — coerce early so formatAmount works correctly
     if (parsed?.amount != null) parsed.amount = Number(parsed.amount);
     if (!parsed?.amount || !parsed?.type) {
@@ -794,12 +891,36 @@ function doPost(e) {
   }
 }
 
+// Builds the "reaction" instructions block shared by parseAndReactWithGemini
+// and handleReceiptPhoto, based on the chat's tone (friendly/savage) and
+// language (en/tl) settings. Savage stays a *playful* roast of the purchase —
+// never a genuine insult of the person or any protected trait. Mild swearing
+// is allowed for flavor (that's the "mumu"-style Taglish roast this is
+// modeled on) but never slurs or hate speech.
+function buildReactionRules(tone, language) {
+  const toneRule = tone === "savage"
+    ? `Style: SAVAGE ROAST. React like a sassy, savage best friend playfully roasting this ` +
+      `purchase — exaggerated, sarcastic, dramatic (e.g. "Tangina, 1000 pesos para sa ` +
+      `carwash?? May hand and foot spa ba yan?"). Mild swearing/curse words are fine for ` +
+      `flavor (e.g. "tangina", "putangina", "punyeta" in Taglish, or "damn"/"hell" in ` +
+      `English) — that's part of the fun. Tease the spending choice, the price, or the ` +
+      `frequency — NEVER the person themselves or any protected trait (appearance, race, ` +
+      `gender, etc.), and never slurs or hate speech. It should read as loving banter ` +
+      `between close friends, not an actual insult.`
+    : `Style: FRIENDLY. React like a warm, supportive friend — encouraging and lighthearted.`;
+  const languageRule = language === "tl"
+    ? `Language: Filipino/Taglish — a natural casual mix of Tagalog and English, the way ` +
+      `friends actually text each other.`
+    : `Language: English.`;
+  return `- ${toneRule}\n- ${languageRule}\n- Keep it to 1-2 sentences with emojis.`;
+}
+
 // =====================================================
 // GEMINI PARSER — extracts amount, type, category,
 // paidBy name, and a friendly reaction emoji string.
 // Amount rules adapt to the chat's configured currency.
 // =====================================================
-function parseAndReactWithGemini(text, userName, currency, members) {
+function parseAndReactWithGemini(text, userName, currency, members, tone, language) {
   try {
     const memberList = members.join(", ");
     const decimalRule = currency.decimals === 0
@@ -807,6 +928,7 @@ function parseAndReactWithGemini(text, userName, currency, members) {
       : `Currency is ${currency.name} (${currency.code}). Return amount as a number with up to ${currency.decimals} decimal places (e.g. 5.50).`;
     const amountRules =
       `- "10k" means 10,000, "1.5k" means 1,500, "10m" means 10,000,000 (any currency)\n- ${decimalRule}`;
+    const reactionRules = buildReactionRules(tone, language);
 
     const prompt = `
 You are a friendly group expense assistant.
@@ -832,6 +954,9 @@ Category options: Food, Transport, Accommodation, Activities, Shopping, Other
 For expense tracking, type is almost always "expense".
 Use "income" only if someone explicitly received money back or was reimbursed.
 
+Reaction rules (the "reaction" field below):
+${reactionRules}
+
 Return ONLY a raw JSON object — no markdown fences, no explanation:
 {
   "type": "expense" or "income",
@@ -839,7 +964,7 @@ Return ONLY a raw JSON object — no markdown fences, no explanation:
   "note": "short description of what was purchased",
   "category": "Food | Transport | Accommodation | Activities | Shopping | Other",
   "paidBy": "Name in Title Case",
-  "reaction": "short friendly reply with emojis (1-2 sentences)"
+  "reaction": "the reaction text, following the reaction rules above"
 }
 
 User message: "${text}"
@@ -1319,6 +1444,8 @@ function getSettlement(chatId) {
 function handleReceiptPhoto(msg, chatId) {
   const currency = getCurrency(chatId);
   const members = getMembers(chatId);
+  const tone = getTone(chatId);
+  const language = getLanguage(chatId);
   const senderName = msg.from.first_name || "User";
   const caption = (msg.caption || "").trim();
 
@@ -1349,6 +1476,7 @@ function handleReceiptPhoto(msg, chatId) {
   const amountRules = currency.decimals === 0
     ? `Currency: ${currency.name} (${currency.code}). Return amount as a plain integer.`
     : `Currency: ${currency.name} (${currency.code}). Amount with up to ${currency.decimals} decimal places.`;
+  const reactionRules = buildReactionRules(tone, language);
 
   const prompt = `You are a receipt scanner for a group expense tracker.
 Analyze this receipt image and extract the total expense.
@@ -1357,6 +1485,9 @@ Trip members (valid payer names): ${memberList}${captionHint}
 
 If the caption names a trip member, use them as paidBy. Otherwise use: "${senderName}".
 
+Reaction rules (the "reaction" field below):
+${reactionRules}
+
 Return ONLY a raw JSON object (no markdown fences, no explanation):
 {
   "type": "expense",
@@ -1364,7 +1495,7 @@ Return ONLY a raw JSON object (no markdown fences, no explanation):
   "note": "<brief what the receipt is for>",
   "category": "Food | Transport | Accommodation | Activities | Shopping | Other",
   "paidBy": "<Name in Title Case>",
-  "reaction": "<short friendly reply with emojis>",
+  "reaction": "<the reaction text, following the reaction rules above>",
   "items": ["<item>: <amount>"]
 }`;
 
@@ -1736,6 +1867,8 @@ function sendWelcome(chatId, adderName) {
     `<code>lunch 25 - Kristel Chloe</code>\n` +
     `<code>hotel 150</code> <i>(payer = you)</i>\n` +
     `📷 Or send a <b>receipt photo</b> to scan it!\n\n` +
+    `🎭 <i>Optional: want spicier reactions? Try <code>/settone savage</code> ` +
+    `(+ <code>/setlanguage tl</code> for Filipino/Taglish roasts).</i>\n\n` +
     `Use /help to see all commands.`;
 
   sendMessage(chatId, msg, "HTML");
